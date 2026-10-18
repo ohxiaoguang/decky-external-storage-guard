@@ -1,6 +1,7 @@
 import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { Device } from "../types";
 import { zh, kind, size, time } from "../strings";
+import { accessState } from "./DeviceList";
 import { RemountControls } from "./RemountControls";
 
 export function DeviceDetail({ device: d, readable, busy, onRemount }: {
@@ -10,7 +11,7 @@ export function DeviceDetail({ device: d, readable, busy, onRemount }: {
     <PanelSectionRow><div style={{ fontSize: 13, overflowWrap: "anywhere", lineHeight: 1.6 }}>
       <strong>{d.model || d.name}</strong>
       <p>{d.id} · {kind(d.kind)} · {size(d.size)}</p>
-      <p>{d.mounted ? zh.mounted : zh.unmounted} · {d.readOnly ? zh.readonly : zh.writable}</p>
+      <p>{d.mounted ? zh.mounted : zh.unmounted} · {accessState(d)}</p>
       <p>{readable ? `${zh.levels.Error} ${d.counts.Error} · ${zh.levels.Warning} ${d.counts.Warning} · ${zh.levels.Info} ${d.counts.Info}` : zh.unknown}</p>
       <p>{zh.lastEvent}：{d.lastEvent ? time(d.lastEvent) : zh.unavailable}</p>
       <strong>{zh.partition}</strong>

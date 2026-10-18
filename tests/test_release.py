@@ -19,3 +19,12 @@ class ReleaseVersionTests(unittest.TestCase):
         for lock in ({}, {"version": "0.0.1"}, {"version": "0.1.0", "packages": {"": {"version": "0.0.1"}}}):
             with self.subTest(lock=lock), self.assertRaises(ValueError):
                 validate_release("v0.1.0", {"version": "0.1.0"}, lock)
+
+    def test_release_asset_filename_stays_compatible_with_update_link(self):
+        from pathlib import Path
+        from scripts.package import ARCHIVE
+        self.assertEqual(ARCHIVE.name, "External-Storage-Guard.zip")
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
+        for command in ("gh release upload", "gh release create"):
+            line = next(line for line in workflow.splitlines() if command in line)
+            self.assertIn("External-Storage-Guard.zip", line)

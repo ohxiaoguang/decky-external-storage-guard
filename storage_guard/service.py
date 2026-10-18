@@ -8,7 +8,6 @@ from .devices import scan
 from .journal import read_journal, WINDOWS
 from .events import analyze
 from .remount import Remounter
-from .operation_store import OperationStore, AuditStore
 from .suspend import pair_cycles, annotate, history_payload
 from .hardware import system_info, enrich_readers, private_identifiers
 from .report import build_report, REPORT_WINDOWS
@@ -29,9 +28,7 @@ class Service:
         self.active = None
         self.managing = False
         self.remounter = Remounter()
-        self.operation_store = OperationStore()
-        self.audit_store = AuditStore()
-        self.last_operation = self.operation_store.load()
+        self.last_operation = None
         self.reports = {}
 
     async def generate_report(self, window="boot"):
@@ -50,13 +47,7 @@ class Service:
         capture = {}
         snapshot = await self._snapshot(window, capture=capture, management=False)
         await enrich_readers(snapshot["devices"])
-        audit = self.audit_store.load()
-        now_ms = datetime.now(timezone.utc).timestamp() * 1000
-        cutoff = now_ms - {"day": 86400000, "week": 604800000}.get(window, now_ms)
-        audit["operations"] = [op for op in audit["operations"] if
-            (window != "boot" or op.get("bootId") == boot_id()) and
-            (window not in ("day", "week") or isinstance(op.get("startedAt"), (float, int)) and op["startedAt"] >= cutoff)]
-        capture["audit"] = audit
+        capture["operation"] = self.last_operation
         report = build_report(snapshot, capture, system_info(), private_values=private_identifiers(snapshot["devices"]))
         now = time.monotonic()
         self.reports = {key: value for key, value in self.reports.items() if value["expires"] > now}
@@ -82,7 +73,7 @@ class Service:
             # mount attempt merely because the menu/requester has disappeared.
             if not self.managing:
                 self.active.cancel()
-            await asyncio.gather(self.active, return_exceptions=True)
+            await asyncio.gather(asyncio.shield(self.active), return_exceptions=True)
         self.remounter.grants.clear()
         self.reports.clear()
 
@@ -106,36 +97,26 @@ class Service:
         return await asyncio.shield(task)
 
     async def _remount(self, token):
-        def progress(value, required):
-            self.last_operation = {**value, "status": "running", "message": "设备操作进行中，请勿拔出设备或卸载插件"}
-            try:
-                self.operation_store.save(self.last_operation)
-            except OSError as exc:
-                if required:
-                    raise ReadFailure("state_write_failed", "无法记录操作状态，尚未卸载，已拒绝执行") from exc
-                value["warnings"].append("操作记录写入失败；若插件被中断，请以真实挂载状态为准")
-            try:
-                self.audit_store.record(self.last_operation)
-            except OSError as exc:
-                if required:
-                    raise ReadFailure("audit_write_failed", "无法持久记录独立操作审计，尚未卸载，已拒绝执行") from exc
-                warning = "独立审计写入失败；请核对真实挂载状态"
-                if warning not in value["warnings"]:
-                    value["warnings"].append(warning)
-        operation = await self.remounter.execute(token, boot_id(), progress)
+        def progress(value):
+            self.last_operation = {**value, "status": "running", "message": "操作中，请勿拔出设备"}
+        try:
+            operation = await self.remounter.execute(token, boot_id(), progress)
+        except asyncio.CancelledError:
+            self.last_operation = {**(self.last_operation or {}), "status": "interrupted", "mounted": None,
+                                   "unmounted": None if (self.last_operation or {}).get("phase") in ("unmount", "verify_unmount") else (self.last_operation or {}).get("unmounted"),
+                                   "message": "操作被中断，结果不确定，请核对真实挂载状态", "warnings": [],
+                                   "detail": "不会自动重试；后端强制终止或断电无法保证完成"}
+            raise
+        except Exception as exc:
+            operation = {**(self.last_operation or {}), "status": "unknown", "mounted": None,
+                         "message": "操作结果不确定，请核对真实挂载状态", "warnings": [], "detail": type(exc).__name__}
         operation["finishedAt"] = datetime.now(timezone.utc).timestamp() * 1000
         self.last_operation = operation
         try:
-            self.operation_store.save(operation)
-        except OSError:
-            operation["warnings"].append("最终操作记录未能写入；当前会话仍保留结果，请核对真实状态")
-        try:
-            self.audit_store.record(operation)
-        except OSError:
-            operation["warnings"].append("最终独立操作审计未能写入；当前结果仅在本次会话可见")
-        # Refresh real device state and current-boot logs on *all* outcomes,
-        # including command failures/timeouts. Never synthesize a mounted state.
-        snapshot = await self._snapshot("boot")
+            snapshot = await self._snapshot("boot")
+        except Exception:
+            operation["warnings"].append("最终状态刷新失败，请稍后刷新核对")
+            snapshot = None
         return {"operation": operation, "snapshot": snapshot}
 
     async def snapshot(self, window: str = "boot") -> dict:

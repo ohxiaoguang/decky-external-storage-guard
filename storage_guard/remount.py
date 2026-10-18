@@ -13,6 +13,7 @@ from .commands import ReadFailure, run
 from .devices import scan, sysfs_facts
 from .events import BLOCK
 from .journal import read_journal
+from .suspend import ordered
 
 FILESYSTEMS = {"ext4", "exfat", "ntfs", "ntfs3"}
 DATA_TYPES = {"0fc63daf-8483-4772-8e79-3d69d8477de4",  # Linux filesystem data
@@ -38,6 +39,11 @@ def mount_options(part: dict, readonly: bool) -> list[str]:
             elif matches or key in ("uid", "gid"):
                 raise ReadFailure("unsupported_permissions", "无法确认非 Linux 文件系统的原挂载权限；为避免改变存档访问权限，禁止操作")
     return result
+
+
+def current_readonly(part):
+    # Live state only. Never request rw or override a filesystem's protections.
+    return bool(part["readOnly"] or any(m["readOnly"] or "emergency_ro" in m.get("options", "").split(",") for m in part["mounts"]))
 
 
 def allowed_mount(target: str) -> bool:
@@ -141,13 +147,16 @@ def filesystem_warnings(records: list[dict], part: dict, boot: str) -> list[str]
         (r"(?:journal.*abort|abort.*journal)", "检测到文件系统 journal aborted / 日志中止证据"),
         (r"filesystem check required|(?:run|requires?|needs?).*(?:fsck|file\s*system check)|check.*required", "检测到 filesystem check required / 需要文件系统检查的证据"),
     )
-    for row in records:
-        message = row.get("MESSAGE", "")
-        if row.get("_BOOT_ID") != boot or part["name"] not in BLOCK.findall(message):
-            continue
+    relevant = [r for r in ordered(records) if r.get("_BOOT_ID") == boot and part["name"] in BLOCK.findall(r.get("MESSAGE", ""))]
+    last_mount = max((i for i, row in enumerate(relevant) if re.search(
+        r"(?:EXT4-fs|exfat(?:-fs)?|ntfs3?).*(?:\bmounted filesystem|\bre-mounted|\bremounted filesystem)", row.get("MESSAGE", ""), re.I)), default=-1)
+    for index, row in enumerate(relevant):
         for pattern, description in patterns:
-            if re.search(pattern, message, re.I) and description not in warnings:
-                warnings.append(description)
+            if re.search(pattern, row.get("MESSAGE", ""), re.I):
+                context = "历史记录：后续观察到挂载，是否修复未确认" if index < last_mount else "日志故障证据：当前是否仍异常无法仅凭历史日志确认"
+                warning = f"{context}；{description}"
+                if warning not in warnings:
+                    warnings.append(warning)
     if any("emergency_ro" in m.get("options", "").split(",") for m in part["mounts"]):
         warnings.append("挂载状态报告 emergency_ro")
     return warnings
@@ -204,7 +213,7 @@ class Remounter:
                  "finishedAt": None, "returncode": None, "stdout": "", "stderr": "", "status": "pending", "outputAvailable": False}
         result["commands"].append(entry)
         if progress:
-            progress(result, phase == "unmount")
+            progress(result)
         try:
             entry["status"] = "running"
             output = await run(argv, timeout=20, limit=65536)
@@ -218,7 +227,7 @@ class Remounter:
         finally:
             entry["finishedAt"] = datetime.now(timezone.utc).timestamp() * 1000
             if progress:
-                progress(result, False)
+                progress(result)
 
     @staticmethod
     def observation(part):
@@ -241,34 +250,34 @@ class Remounter:
         self.grants.clear()
         try:
             if progress:
-                progress(result, True)
+                progress(result)
             _, part = await self.target(grant, True)
-            readonly = part["readOnly"] or any(m["readOnly"] for m in part["mounts"])
+            readonly = current_readonly(part)
             try:
                 journal = await read_journal("boot")
                 evidence = filesystem_warnings(journal["records"], part, boot)
                 result["warnings"].extend(evidence)
-                readonly |= bool(evidence)
                 if journal["status"] != "ok" or journal["limited"]:
                     result["warnings"].append("日志不可用或不完整，无法排除其他文件系统故障")
             except ReadFailure as exc:
                 result["warnings"].append(f"日志检查不可用：{exc}")
-            if readonly:
-                result["warnings"].append("本次只读挂载，不尝试解除只读状态；重新挂载不修复文件系统")
-            options = mount_options(part, readonly)
             # Reading logs can take time: revalidate mounts, diskseq and the block
             # node once more immediately before issuing the first mutation.
             _, before = await self.target(grant, True)
+            readonly |= current_readonly(before)
+            if readonly:
+                result["warnings"].append("本次只读挂载，不尝试解除只读状态；重新挂载不修复文件系统")
+            options = mount_options(before, readonly)
             result["beforeUnmount"] = self.observation(before)
             result["phase"] = "unmount"
             if progress:
-                progress(result, True)
+                progress(result)
             await self.command(["udisksctl", "unmount", "-b", grant.path, "--no-user-interaction"], "unmount", result, progress)
             # A zero exit is not proof that the mount disappeared.
             result["unmounted"] = None
             result["phase"] = "verify_unmount"
             if progress:
-                progress(result, False)
+                progress(result)
             # Verify disconnection/replacement and unexpected automount after
             # unmount; never mount a newly arrived disk reusing the same name.
             _, absent = await self.target(grant, False)
@@ -282,7 +291,7 @@ class Remounter:
             await self.command(argv, "mount", result, progress)
             result["phase"] = "verify"
             if progress:
-                progress(result, False)
+                progress(result)
             _, actual = await self.target_after_mount(grant)
             result["afterMount"] = self.observation(actual)
             actual_options = mount_options(actual, readonly)

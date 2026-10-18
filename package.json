@@ -1,6 +1,6 @@
 {
   "name": "external-storage-guard",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "External storage, suspend/resume diagnostics, private reports and confirmed safe remounts for Decky Loader",
   "type": "module",
   "license": "BSD-3-Clause",
