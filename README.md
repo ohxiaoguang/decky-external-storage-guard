@@ -1,6 +1,6 @@
-# External Storage Guard v0.1.0
+# External Storage Guard v0.2.0
 
-SteamOS 游戏模式中的只读外部存储诊断 Decky 插件。适用于 Steam Deck、安装 SteamOS 的 ROG Ally X 等设备；首版界面为中文。
+SteamOS 游戏模式中的外部存储诊断 Decky 插件。适用于 Steam Deck、安装 SteamOS 的 ROG Ally X 等设备；界面为中文。v0.2.0 在现有监控功能上增加需用户确认的安全重新挂载。
 
 本项目实现了实际系统读取，没有内置演示数据、HTTP 服务或额外监听端口。**构建和自动化测试通过不等于已经通过实机验收**；ROG Ally X / Steam Deck 的 Decky 加载、手柄操作、真实读卡器与 USB 桥接兼容性仍需按下文验证。
 
@@ -24,15 +24,39 @@ SteamOS 游戏模式中的只读外部存储诊断 Decky 插件。适用于 Stea
 
 没有异常记录不等于设备健康。计数仅针对当前时间范围内**返回的最近记录**，不是磁盘寿命计数或完整健康评估。
 
+## 安全重新挂载（v0.2.0）
+
+进入设备详情，在相应分区点击 **重新挂载**。弹窗会提示：正在运行的游戏可能受影响，必须先关闭使用设备的程序并等待写入完成；确认后才开始操作。操作期间按钮、刷新及时间范围切换禁用，避免重复点击。
+
+允许操作的范围刻意保守：
+
+- sysfs 确认 SD / USB 外部设备上的普通数据分区，不能是整盘；文件系统限 ext4、exFAT、NTFS / NTFS3。分区类型须为 Linux filesystem data / Microsoft basic data（含相应 MBR 0x83 / 0x07）。EFI、系统专用、交换、未知分区类型以及 FAT 分区只保留监控。
+- 必须有文件系统 UUID、分区 PARTUUID、父盘 `diskseq`、分区号、匹配的主次设备号与完整 sysfs 拓扑。缺少这些信息、存在加密 / LVM / 映射或 holders 关系时拒绝操作。
+- 目标分区须恰好有一个挂载点，且整台外部盘的可见挂载都在 `/run/media/`、`/media/` 或 `/mnt/` 下。其他路径、系统挂载、未挂载、多重挂载及使用中的交换空间均不允许。某些自定义挂载或桥接盒因此可能只能监控，界面显示具体原因。
+- 承载 Decky 插件本体、homebrew 目录或插件运行数据的设备不允许重新挂载，避免操作期间卸载自身代码或记录目录。
+- exFAT / NTFS 还须能从当前真实挂载选项明确取得数值 uid / gid；无法确认时（例如部分 FUSE 挂载）只支持监控，避免以 root 默认权限重挂后 Steam 无法访问存档。仅白名单保留数值 uid / gid / 权限掩码及 nosuid / nodev / noexec 标志，不接受前端提交的选项；挂载后验证这些要求。
+
+后端从已扫描的合格分区签发有效期 120 秒的一次性授权。前端只提交授权令牌，不能直接指定磁盘路径、挂载参数或执行命令。执行时重新扫描，再比对连接序号、分区身份、容量、设备号、拓扑和原挂载信息；读取故障日志后再次检查；每个命令前还核对实际块设备文件和 sysfs，降低拔插、同名设备复用和过期页面造成的误操作风险。
+
+执行顺序固定为 `udisksctl unmount -b <后端验证的分区> --no-user-interaction`，只有成功返回才继续验证卸载状态和身份，再执行 `udisksctl mount -b <同一分区> --no-user-interaction`。设备忙、权限不足或其他卸载失败立即停止，不调用 mount，不使用强制或懒卸载。卸载后若设备断开、身份变化或被其他程序重新挂载，也立即停止；不会操作新到达的同名设备。
+
+**重新挂载不是文件系统修复。** 当前启动日志中针对该分区的 `emergency_ro`、journal aborted、filesystem check required / fsck 提示会在详情和确认框显示警告。原先只读或发现上述证据时，挂载命令只增加 `--options ro`，并验证结果；不尝试强制恢复可写。历史证据和有限日志均不能证明当前健康，`errors=remount-ro` 参数本身不作为错误证据。插件不调用 fsck、e2fsck、任何格式化 / 修复工具，也不重置 USB / PCIe 或修改内核参数。
+
+结束后（成功、失败、超时等）重新扫描设备、挂载信息和本次启动的最新有限内核日志，页面切回本次启动，明确显示成功或失败、阶段与原始失败原因。若卸载成功后挂载失败，会保留失败状态并提示分区可能未挂载；不能据此继续运行原游戏。不会自动重试，也不提供对未挂载分区的单独“挂载”功能。UDisks 可能选择不同的挂载路径或默认挂载选项，操作后务必核对实际路径、只读状态与 Steam 库可用性。
+
+操作记录仅写入 Decky 为此插件提供的运行目录 `$DECKY_PLUGIN_RUNTIME_DIR/remount-state.json`，不写入外部盘或全局系统配置。首次卸载前无法记录状态会拒绝执行；之后的记录写入失败会显示警告。关闭菜单或 RPC 取消不会故意中断进行中的卸载 / 挂载流程。Decky 强制终止、断电或实际拔盘仍可能中断操作：下次启动读取未完成记录，提示结果未确认并刷新真实状态，不自动补挂载。**操作期间不要拔盘、禁用、更新或卸载插件。** 用户空间逐步检查不能消除热拔插在命令交接间隙的所有竞态，也不能替代关闭游戏和重要存档备份。
+
 ## 安全、权限与性能
 
-插件仅运行固定参数的 `lsblk`、`findmnt`、`journalctl`，读取 sysfs 和本次 boot ID。没有 shell 命令拼接；不执行 mount / umount、修复、格式化、扫描重置、SMART 或读写压力测试，不修改系统配置，不调用 sudo 或询问密码。
+监控只调用固定参数的 `lsblk`、`findmnt`、`journalctl` 并读取 sysfs / boot ID；只有用户在确认弹窗确认后，设备管理 API 才会调用上述两种 `udisksctl` 操作。没有 shell 拼接、全局权限策略变更、`umount -l/-f` 或额外 HTTP 服务。
 
-`plugin.json` 声明 Decky 支持的 `root` 标志，让后端在 Decky 已有的权限范围内读取内核日志（官方模板的 `_root` 是未启用的占位形式，核对 Loader 实现后改为实际标志）。若运行环境仍不授权读取，界面明确显示权限不足。插件不会自动改变 journald、用户组或系统权限。
+`plugin.json` 沿用 Decky 支持的 `root` 标志，使用 Decky 已有进程身份，让 UDisks / polkit 自行执行授权检查。`--no-user-interaction` 禁止弹出认证提示；授权不足、缺少 UDisks / `udisksctl` 或系统总线不可用时报告原因，不调用 sudo / pkexec、不改变用户组或 polkit 规则、不绕过认证。root 标志不保证所有 SteamOS / UDisks 配置都授权成功。
 
-只在界面挂载时和手动刷新时读取；没有后台定时器。前端离开界面后忽略未完成结果，已经发出的后端读取会在超时内结束；卸载插件时取消读取并终止尚存子进程。
+只在打开界面、手动刷新和确认操作后读取；没有后台轮询。普通读取在卸载时取消，正在执行的已确认事务尝试完成后退出，但 Decky 仍可能在其终止期限到达后强制停止，以上操作记录用于下次识别中断。
 
-每条系统命令最多 8 秒；一次刷新按顺序最多执行三条命令，通常远低于 24 秒。stdout 上限 8 MiB、stderr 上限 64 KiB；每次最多读取最新 6000 条内核日志，每条消息最多 4096 字符，返回最新 500 条匹配事件；前端每页显示 20 条。触及日志条数 / 事件条数限制会提示结果不完整，触及输出上限则明确报错。设备扫描失败、日志为空、权限不足、没有历史、超时、命令缺失、读取失败分别返回状态；读取失败绝不显示为“设备正常”。
+读取命令各有 8 秒超时，本次启动刷新最多三条命令；历史范围会额外读取本次启动日志以展示当前故障警告。UDisks 每步最多等待 20 秒且不重试，多次安全复核和最终刷新使单次操作最坏可能超过两分钟，通常快得多；前端异步等待，不阻塞游戏 UI。命令超时也不证明 UDisks 系统服务绝对没有完成操作，因此按结果未确认提示，以真实刷新状态为准。
+
+监控 stdout 上限 8 MiB、stderr 上限 64 KiB；UDisks 输出上限 64 KiB；最多读取最新 6000 条内核日志，每条消息最多 4096 字符，返回最新 500 条匹配事件，前端每页 20 条。触及限制会提示不完整或报错。读取失败绝不显示为“设备正常”。
 
 ## 技术结构
 
@@ -40,12 +64,14 @@ SteamOS 游戏模式中的只读外部存储诊断 Decky 插件。适用于 Stea
 
 ```text
 main.py                     Decky API v1 与卸载生命周期
-storage_guard/commands.py   有界、可取消的只读命令执行
+storage_guard/commands.py   有界、可取消的命令执行
 storage_guard/devices.py    设备发现、sysfs、挂载状态与系统盘排除
 storage_guard/journal.py    日志读取、时间范围和错误状态
 storage_guard/rules.py      独立分类规则（纯函数）
 storage_guard/events.py     关联、启动隔离、排序与数量限制（纯函数）
 storage_guard/service.py    组合扫描、事件计数与结构化响应
+storage_guard/remount.py    一次性授权、分区资格、实时身份检查、UDisks 事务
+storage_guard/operation_store.py Decky 插件运行目录中的原子操作记录
 src/App.tsx                 按需请求、页面状态、筛选
 src/components/             设备列表、设备详情、日志列表、读取状态
 src/types.ts                设备、事件、响应结构
@@ -106,7 +132,7 @@ external-storage-guard/
 
 [下载最新安装包](https://github.com/ohxiaoguang/decky-external-storage-guard/releases/latest/download/External-Storage-Guard.zip) · [查看所有 Release](https://github.com/ohxiaoguang/decky-external-storage-guard/releases)
 
-固定版本安装地址为 `https://github.com/ohxiaoguang/decky-external-storage-guard/releases/download/v0.1.0/External-Storage-Guard.zip`（替换版本标签可安装其他版本）。直链需要相应 Release 已成功发布并附带安装资产；返回 404 时先检查 Release / Actions 页面。
+固定版本安装地址为 `https://github.com/ohxiaoguang/decky-external-storage-guard/releases/download/v0.2.0/External-Storage-Guard.zip`（替换版本标签可安装其他版本）。直链需要相应 Release 已成功发布并附带安装资产；返回 404 时先检查 Release / Actions 页面。
 
 也可将下载或本地构建的 `External-Storage-Guard.zip` 放入掌机 Downloads，再通过 **Install Plugin from ZIP File / 从 ZIP 文件安装插件** 安装。**不要使用 GitHub 自动生成的 Source code (zip) / Source code (tar.gz)**；源码归档没有编译后的 `dist/index.js`，不能代替插件安装包。
 
@@ -116,12 +142,12 @@ external-storage-guard/
 
 构建任务只有 `contents: read`，发布任务使用 GitHub 自动提供的 `GITHUB_TOKEN` 和 `contents: write`，无需额外 PAT。正式标签发布为 latest，含连字符的预发布标签发布为 prerelease；标签与 `package.json`、`package-lock.json` 必须完全一致。重跑同一标签的工作流会复用 Release 并重新上传资产，不创建第二个 Release。
 
-首次版本的标签命令示例（发布流程必须已提交到该标签所指提交）：
+当前版本的标签命令示例（发布流程必须已提交到该标签所指提交）：
 
 ```bash
-python3 scripts/check_release.py v0.1.0
-git tag -a v0.1.0 -m "External Storage Guard v0.1.0"
-git push origin v0.1.0
+python3 scripts/check_release.py v0.2.0
+git tag -a v0.2.0 -m "External Storage Guard v0.2.0"
+git push origin v0.2.0
 ```
 
 后续发版先用 `npm version <新版本> --no-git-tag-version` 同步 package 与 lockfile 并提交，再推送对应的 `v<新版本>` 标签；不要移动已有发布标签。版本不匹配时查看 Actions 的 **Check tag and package versions** 步骤。
@@ -134,17 +160,17 @@ git push origin v0.1.0
 
 无法使用 Actions 时，手动发布步骤：
 
-1. 检出计划发布的标签，在该提交运行 `npm ci --ignore-scripts`、`python3 scripts/check_release.py v0.1.0` 和 `npm run package`（其他版本替换标签）。全部成功后得到 `out/External-Storage-Guard.zip`。
+1. 检出计划发布的标签，在该提交运行 `npm ci --ignore-scripts`、`python3 scripts/check_release.py v0.2.0` 和 `npm run package`（其他版本替换标签）。全部成功后得到 `out/External-Storage-Guard.zip`。
 2. 在 GitHub 仓库 **Releases → Draft a new release**，选择同一标签，上传上述 ZIP 作为独立 Release 资产，文件名保持 **External-Storage-Guard.zip**。正式版发布并标记为 latest；预发布勾选 prerelease。
 3. 检查 Release 页面存在该资产，打开上面的 `latest/download` 直链并下载验证。不要选择页面自动附带的 Source code ZIP。
 
 已在本机授权 GitHub CLI 的维护者也可执行以下命令（不能用它绕过组织策略）：
 
 ```bash
-gh release create v0.1.0 out/External-Storage-Guard.zip --verify-tag --title "External Storage Guard v0.1.0" --generate-notes --latest
+gh release create v0.2.0 out/External-Storage-Guard.zip --verify-tag --title "External Storage Guard v0.2.0" --generate-notes --latest
 ```
 
-若 Release 已存在，使用 `gh release upload v0.1.0 out/External-Storage-Guard.zip --clobber` 补传资产，并在网页确认它不是草稿且是所需的 latest 正式版。
+若 Release 已存在，使用 `gh release upload v0.2.0 out/External-Storage-Guard.zip --clobber` 补传资产，并在网页确认它不是草稿且是所需的 latest 正式版。
 
 ## 实机验收清单
 
@@ -159,16 +185,27 @@ gh release create v0.1.0 out/External-Storage-Guard.zip --verify-tag --title "Ex
 7. **历史和不可用状态**：选择最近 24 小时与上次启动；没有持久日志应明确提示没有历史；权限不足应明确提示而非显示正常。不需要为验收去改系统权限；权限失败已有单元测试。
 8. **生命周期**：刷新后关闭菜单再重开，应重新读取；卸载后没有插件轮询、定时任务或尚存命令进程。
 
+v0.2.0 设备管理还需在备份好数据、关闭游戏的条件下验证：
+
+1. 在正常 SD / USB 数据分区的详情页确认按钮资格；对内置盘、整盘、EFI、交换、未挂载或身份不足分区确认无可用操作按钮。
+2. 打开确认框后先取消，确认挂载状态不变；再在关闭所有使用设备的程序后确认，核对操作中禁用、成功提示、新挂载路径与日志刷新；连续点击不应发出第二次操作。
+3. 仅在可丢弃的测试介质上，用终端工作目录或打开文件保持普通 busy 状态，确认安全卸载失败后立即停止且没有强制卸载；退出该程序后再试。不要在写入存档时试验。
+4. 权限不足、挂载失败、移除 / 换盘、紧急只读、journal aborted、检查需求和强制终止场景已由模拟测试覆盖。不要为了实机验收故意损坏文件系统或在操作中拔盘；遇到真实故障时确认警告、只读策略、失败状态和原始原因，后续检查交由系统工具处理。
+5. 使用手柄核对确认 / 取消、灰色按钮及原因、操作结果和长日志滚动。关闭菜单后重开应读回最后操作记录；中断记录只提示核对状态，不自动再执行。
+
 ## 排错与可选只读诊断
 
 - 不显示设备：确认它是 SD 或 USB 外部设备且仍被内核识别。内置 NVMe、eMMC、仅有 removable 标志而无总线证据的设备不会列出。可在桌面终端用下面只读命令核对，不需要修改或修复磁盘。
 - 权限不足：确认运行的 Decky 版本支持 `root` 标志，以及其后端自身拥有读取日志的权限。不要为本插件修改 journald 或用户组、输入 sudo 密码。保留界面错误信息供排查。
 - 无日志 / 无历史：内核日志可能未被 journald 收集、当前环境没有 journal 或没有持久化上次启动。插件不会自动开启持久化。日志读取成功但没有匹配异常会显示“已读取的日志中未发现严重或警告事件”，这与日志不可用不同。
 - 读取超时 / 超上限：手动重试并缩短时间范围；结果有截断提示时，统计仅覆盖有限记录。
+- 重新挂载按钮灰色：查看分区下方原因。缺少 UUID / PARTUUID / diskseq、未知分区类型、多挂载、非支持挂载目录、映射 / swap 均只支持监控，不应通过修改策略强行启用。
+- 操作显示设备忙：关闭使用设备的游戏、终端和文件管理器，确认写入结束后刷新并重新确认；插件不会强制卸载。
+- 卸载后挂载失败 / 中断 / 结果未确认：先刷新核对是否仍挂载和只读；停止依赖该设备的程序，保留错误原因。可由 SteamOS 自带存储管理处理，插件不自动重试或修复，也不会自动执行 fsck。
 - 加载失败 / 通信失败：核对安装包目录层级、`dist/index.js`、`storage_guard`、`api_version: 1` 和当前 Decky 版本；使用 Decky 的日志页面或下面服务日志定位，不使用独立 HTTP 服务。
 
 ```bash
-lsblk --json --bytes --tree --output NAME,KNAME,PATH,TYPE,SIZE,MODEL,TRAN,RM,RO,ROTA,FSTYPE,MOUNTPOINTS,MAJ:MIN
+lsblk --json --bytes --tree --output NAME,KNAME,PATH,TYPE,SIZE,MODEL,TRAN,RM,RO,ROTA,FSTYPE,MOUNTPOINTS,MAJ:MIN,UUID,PARTUUID,PARTTYPE
 findmnt --json --list --output SOURCE,TARGET,FSTYPE,OPTIONS,MAJ:MIN
 readlink -f /sys/class/block/mmcblk0
 cat /sys/class/block/mmcblk0/device/type
@@ -182,6 +219,8 @@ journalctl -u plugin_loader --no-pager -n 100
 
 自动化覆盖：用户提供的真实 MMC 日志；USB、SCSI / UAS、文件系统、重复计数；设备类型 / 拓扑与系统盘排除；未挂载、多挂载、只读；启动隔离、名称复用边界与未知关联；权限不足、无历史、无日志、格式错误；缺少命令、超时、输出上限、卸载取消；Decky 后端入口实例化及 JSON 响应。
 
+设备管理测试补充：合格 SD / USB 分区，整盘 / 系统拓扑 / EFI / swap / 映射阻止，任意前端路径拒绝，过期 / 已用授权、重复请求，UUID / 设备号 / diskseq / 挂载点变化，真实块文件类型检查、swap 文件占用，卸载失败不继续，卸载后掉线 / 换盘 / 自动挂载，挂载失败及验证失败，故障证据与保留只读，操作记录及中断恢复。前端打包测试使用测试专用 hooks / Decky 桩验证确认、取消、重复点击、操作中禁用和刷新后的失败状态，不等同于 SteamOS 手柄测试。
+
 非 SteamOS 开发环境可以直接运行以上测试和构建，不模拟健康设备展示。真实硬件兼容性、Decky 运行时 UI 和手柄交互需实机验收。版本对应的实际验证结果见交付时的验证报告。
 
-首版没有重新挂载、安全弹出、重新扫描设备、修复、SMART、压力测试、常驻通知或自动恢复按钮；这些属于后续规划。
+v0.2.0 仅新增安全重新挂载；安全弹出、设备重置 / 重新扫描、修复、SMART、压力测试、常驻通知和自动恢复不在本次范围。

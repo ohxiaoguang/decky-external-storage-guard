@@ -17,11 +17,20 @@ export const zh = {
   partition: "分区与挂载", lastEvent: "最近异常", scan: "设备扫描", journal: "内核日志",
   unknownType: "未知", sd: "SD 卡", filter: "筛选", page: "页",
   kind: "事件类型", refs: "日志引用", timeUnknown: "时间不可用", count: "记录数",
+  remount: "重新挂载", cancel: "取消", confirmRemount: "确认重新挂载",
+  remountWarning: "正在运行的游戏或程序可能受影响，存在存档丢失风险。请先关闭使用此设备的所有程序，确保写入已结束。将安全卸载后重新挂载；卸载失败会立即停止。此操作不修复文件系统，不解除故障只读状态，挂载路径也可能变化。",
+  noRepair: "重新挂载不能代替文件系统检查或修复；本插件不会运行 fsck。",
+  managing: "正在安全卸载并重新挂载，请勿拔出设备或卸载插件…",
+  operation: "设备操作结果", operationSuccess: "成功", operationFailure: "未完成",
+  phase: "阶段", phases: { validation: "操作对象校验", unmount: "安全卸载", mount: "重新挂载", verify: "挂载状态确认" } as Record<string, string>,
+  manageUnavailable: "该分区仅支持监控，请刷新查看操作资格。",
+  communicationUnknown: "设备操作通信中断，结果尚未确认。后端可能仍在执行，请等待后刷新核对真实状态，不要立即重复操作。",
   eventKinds: {
     cache_flush: "缓存刷新失败", io_error: "读写失败", filesystem: "文件系统错误",
     readonly: "异常只读", offline: "设备离线", disconnect: "设备断开", initialization: "初始化失败",
     tuning: "调谐回退", timeout: "响应超时", reset: "重试或重置", crc: "传输校验",
     controller: "控制器异常", mount: "挂载变化", recognized: "设备识别",
+    filesystem_check: "文件系统检查要求 / 日志中止",
   } as Record<string, string>,
 } as const;
 

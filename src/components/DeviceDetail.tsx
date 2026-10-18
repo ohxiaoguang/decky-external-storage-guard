@@ -1,8 +1,11 @@
 import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { Device } from "../types";
 import { zh, kind, size, time } from "../strings";
+import { RemountControls } from "./RemountControls";
 
-export function DeviceDetail({ device: d, readable }: { device: Device; readable: boolean }) {
+export function DeviceDetail({ device: d, readable, busy, onRemount }: {
+  device: Device; readable: boolean; busy: boolean; onRemount: (token: string) => void;
+}) {
   return <PanelSection title={zh.detail}>
     <PanelSectionRow><div style={{ fontSize: 13, overflowWrap: "anywhere", lineHeight: 1.6 }}>
       <strong>{d.model || d.name}</strong>
@@ -19,5 +22,7 @@ export function DeviceDetail({ device: d, readable }: { device: Device; readable
         </div>) : <div>{zh.unmounted}</div>}
       </div>)}
     </div></PanelSectionRow>
+    {d.partitions.filter(p => p.path !== d.id).map(p =>
+      <RemountControls key={p.path} partition={p} busy={busy} onRemount={onRemount} />)}
   </PanelSection>;
 }

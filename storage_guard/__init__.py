@@ -1,1 +1,1 @@
-"""Read-only storage discovery and kernel diagnostics; no third-party dependencies."""
+"""Storage diagnostics and confirmed UDisks management; no third-party dependencies."""
