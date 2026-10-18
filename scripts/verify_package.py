@@ -29,6 +29,7 @@ print('Packaged backend import and lifecycle: OK')
 def verify():
     with ZipFile(ARCHIVE) as archive, TemporaryDirectory() as directory:
         names = archive.namelist()
+        assert not any(n.endswith("/operation_store.py") or n.endswith("remount-state.json") or n.endswith("remount-audit.json") for n in names)
         assert names and all(n.startswith("external-storage-guard/") and ".." not in Path(n).parts for n in names)
         assert sum(n.endswith("/plugin.json") for n in names) == 1
         assert not any(part in {"tests", "node_modules", "__pycache__"} for n in names for part in Path(n).parts)

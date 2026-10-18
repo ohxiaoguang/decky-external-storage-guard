@@ -3,7 +3,6 @@ from copy import deepcopy
 import os
 from pathlib import Path
 import stat
-from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -11,7 +10,6 @@ from unittest.mock import AsyncMock, patch
 from helpers import node, record
 from storage_guard.commands import Output, ReadFailure
 from storage_guard.devices import discover
-from storage_guard.operation_store import OperationStore
 from storage_guard.remount import Remounter, eligibility, filesystem_warnings, live_check, mount_options
 from storage_guard.service import Service
 
@@ -228,20 +226,39 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "verification_failed")
         self.assertEqual(command.call_count, 2)
 
-    async def test_readonly_and_aborted_journal_never_attempt_writable_mount(self):
-        for fault in (False, True):
-            self.setUp()
-            final = deepcopy(self.device)
-            final["partitions"][1]["mounts"][0]["readOnly"] = True
-            if not fault:
-                self.device["partitions"][1]["mounts"][0]["readOnly"] = True
-                self.manager = Remounter()
-                self.manager.decorate([self.device], [], "current", True)
-                self.token = self.device["partitions"][1]["management"]["token"]
-            result, command = await self.execute(scans=[self.device, self.device, self.unmounted, final], rows=[record("EXT4-fs (mmcblk0p1): journal aborted")] if fault else [])
-            self.assertEqual(result["status"], "success")
-            self.assertIn("ro", command.call_args.args[0][-1].split(","))
-            self.assertTrue(result["warnings"])
+    async def test_current_readonly_is_preserved_but_historical_journal_never_forces_ro(self):
+        self.device["partitions"][1]["mounts"][0]["readOnly"] = True
+        self.manager.decorate([self.device], [], "current", True)
+        self.token = self.device["partitions"][1]["management"]["token"]
+        result, command = await self.execute()
+        self.assertEqual(result["status"], "success")
+        self.assertIn("ro", command.call_args.args[0][-1].split(","))
+        self.setUp()
+        result, command = await self.execute(rows=[record("EXT4-fs (mmcblk0p1): journal aborted")])
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("ro", command.call_args.args[0][-1].split(","))
+        self.assertNotIn("rw", command.call_args.args[0][-1].split(","))
+        self.assertTrue(result["warnings"])
+
+    async def test_live_emergency_ro_remains_protected(self):
+        self.device["partitions"][1]["mounts"][0]["options"] += ",emergency_ro"
+        self.manager.decorate([self.device], [], "current", True)
+        self.token = self.device["partitions"][1]["management"]["token"]
+        final = deepcopy(self.device)
+        final["partitions"][1]["mounts"][0]["readOnly"] = True
+        result, command = await self.execute(scans=[self.device, self.device, self.unmounted, final])
+        self.assertEqual(result["status"], "success")
+        self.assertIn("ro", command.call_args.args[0][-1].split(","))
+
+    async def test_repair_followed_by_normal_mount_does_not_inherit_old_readonly_decision(self):
+        rows = [record("EXT4-fs (mmcblk0p1): journal aborted", 1),
+                record("EXT4-fs (mmcblk0p1): mounted filesystem with ordered data mode. r/w", 2)]
+        warnings = filesystem_warnings(rows, self.device["partitions"][1], "current")
+        self.assertIn("历史记录", warnings[0])
+        self.assertIn("是否修复未确认", warnings[0])
+        result, command = await self.execute(rows=rows)
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("ro", command.call_args.args[0][-1].split(","))
 
     async def test_timeout_does_not_continue_unknown_unmount(self):
         result, command = await self.execute(outputs=[ReadFailure("timeout", "超时")])
@@ -257,13 +274,6 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "missing_command")
         self.assertTrue(result["warnings"])
 
-    async def test_required_state_record_failure_prevents_unmount(self):
-        def fail(value, required):
-            raise ReadFailure("state_write_failed", "cannot save")
-        result, command = await self.execute(progress=fail)
-        self.assertEqual(result["status"], "state_write_failed")
-        command.assert_not_called()
-
     async def test_new_identity_after_safety_log_read_is_rejected(self):
         replacement = deepcopy(self.device)
         replacement["sysfs"]["diskseq"] = "100"
@@ -271,11 +281,15 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "stale_target")
         command.assert_not_called()
 
-    async def test_requested_readonly_not_verified_is_not_success(self):
-        result, command = await self.execute(rows=[record("EXT4-fs (mmcblk0p1): emergency_ro")])
+    async def test_requested_current_readonly_not_verified_is_not_success(self):
+        writable = deepcopy(self.device)
+        self.device["partitions"][1]["mounts"][0]["readOnly"] = True
+        self.manager.decorate([self.device], [], "current", True)
+        self.token = self.device["partitions"][1]["management"]["token"]
+        result, command = await self.execute(scans=[self.device, self.device, self.unmounted, writable])
         self.assertIn("ro", command.call_args.args[0][-1].split(","))
         self.assertEqual(result["status"], "verification_failed")
-        self.assertIn("只读", result["detail"])
+
 
 
 class ServiceManagementTests(unittest.IsolatedAsyncioTestCase):
@@ -312,29 +326,3 @@ class ServiceManagementTests(unittest.IsolatedAsyncioTestCase):
             finish.set()
             await closer
             self.assertEqual(service.last_operation["status"], "success")
-
-    async def test_atomic_store_recovers_interrupted_transaction_and_retains_failure(self):
-        with TemporaryDirectory() as directory:
-            store = OperationStore(directory)
-            self.assertIsNone(store.load())
-            value = {"status": "running", "phase": "mount", "warnings": [], "mounted": False, "unmounted": True}
-            store.save(value)
-            loaded = store.load()
-            self.assertEqual(loaded["status"], "interrupted")
-            self.assertIsNone(loaded["mounted"])
-            store.save({**value, "status": "mount_failed", "detail": "bad superblock"})
-            self.assertEqual(store.load()["detail"], "bad superblock")
-            self.assertEqual([p.name for p in Path(directory).iterdir()], ["remount-state.json"])
-
-    async def test_required_record_write_failure_via_real_service_prevents_commands(self):
-        service = Service()
-        device = managed_device()
-        service.remounter.decorate([device], [], "current", True)
-        token = device["partitions"][1]["management"]["token"]
-        with patch("storage_guard.remount.scan", AsyncMock(return_value=inventory(device))), patch(
-            "storage_guard.remount.read_journal", AsyncMock(return_value=clean_journal())), patch(
-            "storage_guard.remount.live_check"), patch("storage_guard.remount.run", AsyncMock()) as command, patch.object(
-            service.operation_store, "save", side_effect=PermissionError("read-only directory")), patch.object(service, "_snapshot", AsyncMock(return_value={})):
-            result = await service.remount(token)
-        self.assertEqual(result["operation"]["status"], "state_write_failed")
-        command.assert_not_called()

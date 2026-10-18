@@ -87,6 +87,7 @@ def build_report(snapshot, capture, hardware, generated_at=None, private_values=
     cycles = capture["cycles"]
     limits = ["仅读取内核及指定休眠服务，排除无关用户程序日志；不是全部系统日志。",
               "设备与控制器信息是报告生成时快照，历史启动不套用当前设备名归属。",
+              "历史 journal aborted / fsck 等日志不证明当前仍异常；后续正常挂载也不证明已经修复。只读状态以实时块设备和挂载状态为准，不尝试解除文件系统保护。",
               "时间相关性不代表因果关系。挂起时 CLOCK_MONOTONIC 不走时；日志接收/转发可能延迟，时间差按字段标明估计。",
               "跨启动展示顺序使用日志实时时间；RTC 回退时不保证跨 Boot 的真实先后。启动内尽可能按单调时间排序。",
               "原始诊断消息仅做隐私脱敏与有界截断，并非逐字节未修改归档；没有记录不证明设备健康。",
@@ -131,16 +132,15 @@ def build_report(snapshot, capture, hardware, generated_at=None, private_values=
     for cycle in cycles[-100:]:
         lines.append(f"Boot={cycle['bootId']} Cycle={cycle['id']} {cycle['status']} 开始={iso(cycle['start']['timestamp'] if cycle['start'] else None)} 唤醒完成={iso(cycle['wake']['timestamp'] if cycle['wake'] else None)} 来源={cycle['completion'] or '缺失'}")
         lines.extend("  " + note for note in cycle["notes"])
-    audit = capture.get("audit", {"status": "unavailable", "message": "独立审计未提供", "operations": [], "limited": False})
-    lines.extend(["", "=== 重新挂载独立操作审计（按所选范围；不依赖内核日志） ===",
-                  redactor.text(audit.get("message", audit["status"])),
-                  "审计状态: " + audit["status"] + ("；历史已截断" if audit.get("limited") else ""),
-                  "命令 returned_zero 仅表示返回码0；success 还要求验证挂载→无挂载→重新挂载及身份/选项。running 是中断或未完成，不是成功。"])
-    for operation in audit["operations"]:
+    operation = capture.get("operation")
+    lines.extend(["", "=== 插件主动操作（当前会话最近一次；非内核日志） ===",
+                  "不持久保存操作历史；重启插件后无法追溯上次会话。系统挂载事件仍从 journal 读取。"])
+    if operation:
         safe = redactor.structured(operation)
         safe["bootId"] = operation.get("bootId")
-        safe["operationId"] = operation.get("operationId")
         lines.append(json.dumps(safe, ensure_ascii=False))
+    else:
+        lines.append("当前会话没有操作结果；不能据此判断上次会话是否完成操作。")
     event_map = {e["id"]: e for e in snapshot["events"]}
     lines.extend(["", "=== 各周期事件时间线（前5分钟 / 进入期间 / 后10分钟；仅已返回事件） ==="])
     for cycle in cycles[-100:]:
@@ -182,6 +182,6 @@ def build_report(snapshot, capture, hardware, generated_at=None, private_values=
     banner = f"报告截断: {'是' if truncated else '未触及本次读取/报告大小上限（不保证历史完整）'}；原始相关记录保留 {len(kept)}/{len(raw)}，上限2MiB。"
     text = banner + "\n" + prefix + "\n\n=== 完整原始诊断消息（脱敏 JSONL 子集，非分类摘要） ===\n" + "\n".join(kept) + "\n"
     summary = "\n".join(["External Storage Guard 简短诊断摘要", f"生成时间 (UTC): {iso(generated_at)}", *lines[4:7], banner,
-                          f"日志状态: {snapshot['journalStatus']['status']}；独立操作审计: {audit['status']}（{len(audit['operations'])} 项）", "完整原始日志请复制完整报告或导出 TXT。", "\n".join(limits)])
+                          f"日志状态: {snapshot['journalStatus']['status']}；会话最近操作: {operation.get('status') if operation else '无记录'}", "完整原始日志请复制完整报告或导出 TXT。", "\n".join(limits)])
     return {"text": text, "summary": summary, "generatedAt": generated_at, "truncated": bool(truncated),
             "size": len(text.encode("utf-8")), "rawCount": len(kept), "availableRawCount": len(raw)}

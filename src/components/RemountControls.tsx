@@ -3,7 +3,8 @@ import { ButtonItem, ConfirmModal, PanelSectionRow, showModal, ShowModalResult }
 import { Partition } from "../types";
 import { zh } from "../strings";
 
-export function RemountControls({ partition, busy, onRemount }: {
+export function RemountControls({ partition, busy, onRemount, compact = false, label }: {
+  compact?: boolean; label?: string;
   partition: Partition; busy: boolean; onRemount: (token: string) => void;
 }) {
   const modal = useRef<ShowModalResult | null>(null);
@@ -36,8 +37,8 @@ export function RemountControls({ partition, busy, onRemount }: {
   };
   return <PanelSectionRow>
     <ButtonItem layout="below" disabled={busy || !management?.eligible}
-      description={management?.eligible ? zh.noRepair : management?.reason || zh.manageUnavailable}
-      onClick={confirm}>{zh.remount} · {partition.name}</ButtonItem>
-    {management?.warnings.map(w => <p key={w} style={{ color: "#ffce70", fontSize: 13 }}>{w}。{zh.noRepair}</p>)}
+      description={compact ? undefined : management?.eligible ? zh.noRepair : management?.reason || zh.manageUnavailable}
+      onClick={confirm}>{label || (compact ? zh.remount : `${zh.remount} · ${partition.name}`)}</ButtonItem>
+    {!compact && management?.warnings.map(w => <p key={w} style={{ color: "#ffce70", fontSize: 13 }}>{w}。{zh.noRepair}</p>)}
   </PanelSectionRow>;
 }
