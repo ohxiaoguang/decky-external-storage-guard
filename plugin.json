@@ -1,0 +1,10 @@
+{
+  "name": "External Storage Guard",
+  "author": "ohxiaoguang",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["storage", "diagnostics"],
+    "description": "只读监控 MicroSD 和 USB 外部存储设备，查看内核存储异常。"
+  }
+}
