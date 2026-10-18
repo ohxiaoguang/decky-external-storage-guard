@@ -17,6 +17,7 @@ async def verify():
     plugin = module.Plugin()
     assert callable(plugin.get_snapshot)
     assert callable(plugin.remount_partition)
+    assert callable(plugin.get_report) and callable(plugin.export_report)
     await plugin._main()
     await plugin._unload()
     await plugin._uninstall()
@@ -41,6 +42,7 @@ def verify():
         subprocess.run([sys.executable, "-I", "-c", BACKEND_CHECK, str(plugin)], cwd=directory, check=True, timeout=10)
         subprocess.run(["node", str(ROOT / "tests/bundle-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=10)
         subprocess.run(["node", str(ROOT / "tests/remount-ui-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=10)
+        subprocess.run(["node", str(ROOT / "tests/report-ui-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=15)
     print(f"ZIP structure and isolated imports: OK ({ARCHIVE.stat().st_size} bytes)")
 
 

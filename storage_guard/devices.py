@@ -3,6 +3,7 @@ import json
 import re
 from pathlib import Path
 from .commands import run, require_success, ReadFailure
+from .hardware import reader_info
 
 LSBLK = ["lsblk", "--json", "--bytes", "--tree", "--output",
          "NAME,KNAME,PATH,TYPE,SIZE,MODEL,TRAN,RM,RO,ROTA,FSTYPE,MOUNTPOINTS,MAJ:MIN,UUID,PARTUUID,PARTTYPE"]
@@ -118,6 +119,8 @@ async def scan() -> tuple[list[dict], list[str], list[str]]:
         raise ReadFailure(getattr(exc, "status", "read_failed"), f"无法确认挂载状态：{exc}") from exc
     facts = {n["kname"]: sysfs_facts(n["kname"]) for n in flatten(raw.get("blockdevices", [])) if n.get("kname")}
     devices = discover(raw, mounted, facts)
+    for device in devices:
+        device["reader"] = reader_info(device["topology"], device["controller"])
     external_names = {p["name"] for d in devices for p in d["partitions"]}
     excluded = [n.get("kname") for n in flatten(raw.get("blockdevices", []))
                 if n.get("kname") and n["kname"] not in external_names]
@@ -126,4 +129,7 @@ async def scan() -> tuple[list[dict], list[str], list[str]]:
             controller = re.search(r"/mmc_host/(mmc\d+)(?:/|$)", info.get("topology", ""))
             if controller:
                 excluded.append(controller[1])
-    return devices, excluded, warnings
+                pci = re.findall(r"/([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])(?=/|$)", info.get("topology", "").split("/mmc_host/")[0])
+                if pci:
+                    excluded.append("pci:" + pci[-1])
+    return devices, list(dict.fromkeys(excluded)), warnings
