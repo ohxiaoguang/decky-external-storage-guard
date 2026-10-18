@@ -52,7 +52,9 @@ src/types.ts                设备、事件、响应结构
 src/strings.ts              中文 UI 字符串、时间 / 容量格式
 tests/                      独立测试数据和自动化测试；不会进入安装包
 scripts/package.py          白名单式 Decky ZIP 打包
+scripts/check_release.py    版本标签与 package / lock 版本一致性校验
 .github/workflows/check.yml 类型检查、测试、构建与 ZIP artifact
+.github/workflows/release.yml v* 标签自动构建、验证并发布 Release
 ```
 
 后端无第三方 Python 依赖，需要 Python 3.10+（使用 Decky 的 Python 运行时）；前端 React 由 Steam / Decky 提供，不另行打包 React。开发依赖以 `package-lock.json` 固定，补充 `@types/react-router` 以满足当前 `@decky/api` 的类型引用。
@@ -69,7 +71,9 @@ npm run build
 npm run package
 ```
 
-`npm run package` 会先完整运行类型检查、测试和构建，再验证 ZIP 结构、在仓库外加载包内后端，以及用测试桩加载前端 ESM 入口（不等同于真实 Decky UI 测试）。生成 `out/external-storage-guard-v0.1.0.zip`。CI 也会产生同名可下载安装的 ZIP artifact。
+`npm run package` 会先完整运行类型检查、测试和构建，再验证 ZIP 结构、在仓库外加载包内后端，以及用测试桩加载前端 ESM 入口（不等同于真实 Decky UI 测试）。生成固定名称的 `out/External-Storage-Guard.zip`。
+
+普通分支 push / PR 运行检查工作流；推送 `v*` 标签运行独立的发布工作流。Actions 页面下载的 artifact 是 GitHub 外层容器 ZIP，需要先解压，取出其中的 `External-Storage-Guard.zip` 再安装。Release 资产中的同名 ZIP 可直接供 Decky 安装。
 
 ZIP 中只有一个顶层目录：
 
@@ -89,11 +93,58 @@ external-storage-guard/
 
 ## ROG Ally X + SteamOS 安装
 
-1. 确保掌机运行 SteamOS 游戏模式并已安装可正常使用的当前 Decky Loader。该 ZIP 是开发版本，并非插件商店已发布版本。
-2. 将构建生成的 `external-storage-guard-v0.1.0.zip` 复制到掌机用户可读取的位置，例如用户的 `Downloads` 目录；不要在安装前手动改变文件系统或日志权限。
-3. 打开游戏模式快捷菜单 → Decky → 设置，启用开发者模式，进入开发者页面，选择 **Install Plugin from ZIP File / 从 ZIP 文件安装插件**，用文件选择器选中上述 ZIP，确认 Decky 的安装提示。若已安装的 Loader 版本仅支持 URL，使用你自行托管的该 ZIP 直链安装，或更新到支持本地 ZIP 的 Loader。
+1. 确保掌机运行 SteamOS 游戏模式并已安装可正常使用的当前 Decky Loader。本项目通过 GitHub Releases 分发，并非插件商店已收录插件。
+2. 打开游戏模式快捷菜单 → Decky → 设置，启用开发者模式，进入开发者页面，选择 **Install Plugin from URL / 从 URL 安装插件**。
+3. 粘贴以下安装直链，确认 Decky 安装提示。该地址指向最新正式 Release 的固定名称安装资产；预发布版本不替换 latest。
+
+   ```text
+   https://github.com/ohxiaoguang/decky-external-storage-guard/releases/latest/download/External-Storage-Guard.zip
+   ```
+
 4. 在 Decky 插件列表打开 **External Storage Guard**。第一次打开会显示加载状态，然后显示真实设备和内核日志状态。默认是本次启动。
 5. 检查设备与日志后，用插件内的刷新按钮重新读取；关闭插件菜单不会产生持续轮询。卸载通过 Decky 的插件管理完成。
+
+[下载最新安装包](https://github.com/ohxiaoguang/decky-external-storage-guard/releases/latest/download/External-Storage-Guard.zip) · [查看所有 Release](https://github.com/ohxiaoguang/decky-external-storage-guard/releases)
+
+固定版本安装地址为 `https://github.com/ohxiaoguang/decky-external-storage-guard/releases/download/v0.1.0/External-Storage-Guard.zip`（替换版本标签可安装其他版本）。直链需要相应 Release 已成功发布并附带安装资产；返回 404 时先检查 Release / Actions 页面。
+
+也可将下载或本地构建的 `External-Storage-Guard.zip` 放入掌机 Downloads，再通过 **Install Plugin from ZIP File / 从 ZIP 文件安装插件** 安装。**不要使用 GitHub 自动生成的 Source code (zip) / Source code (tar.gz)**；源码归档没有编译后的 `dist/index.js`，不能代替插件安装包。
+
+## 自动发布与手动后备方式
+
+`.github/workflows/release.yml` 在推送 `v*` 标签时执行：校验标签版本 → `npm ci --ignore-scripts` → 类型检查和全部单元测试 → Rollup 编译 → 白名单打包和 ZIP / 隔离加载验证 → 生成 SHA-256 → 上传构建 artifact → 发布任务校验下载包的 SHA-256 → 上传固定名资产并公开 GitHub Release。构建 / 测试失败不会进入发布任务，上传失败不会将新建草稿公开。
+
+构建任务只有 `contents: read`，发布任务使用 GitHub 自动提供的 `GITHUB_TOKEN` 和 `contents: write`，无需额外 PAT。正式标签发布为 latest，含连字符的预发布标签发布为 prerelease；标签与 `package.json`、`package-lock.json` 必须完全一致。重跑同一标签的工作流会复用 Release 并重新上传资产，不创建第二个 Release。
+
+首次版本的标签命令示例（发布流程必须已提交到该标签所指提交）：
+
+```bash
+python3 scripts/check_release.py v0.1.0
+git tag -a v0.1.0 -m "External Storage Guard v0.1.0"
+git push origin v0.1.0
+```
+
+后续发版先用 `npm version <新版本> --no-git-tag-version` 同步 package 与 lockfile 并提交，再推送对应的 `v<新版本>` 标签；不要移动已有发布标签。版本不匹配时查看 Actions 的 **Check tag and package versions** 步骤。
+
+如果发布失败，查看 [Actions](https://github.com/ohxiaoguang/decky-external-storage-guard/actions) 对应标签的失败任务：
+
+- `Resource not accessible by integration` / HTTP 403：仓库或组织策略限制了 Actions 的 Release 写权限；由仓库管理员检查 Actions 是否启用、工作流权限及允许的 action 策略，之后重跑失败任务。这里的 `GITHUB_TOKEN` 属于 GitHub runner，与本地开发环境的网络或 CLI 权限不同。
+- runner 未启动、计费额度或 Actions 被禁用：工作流无法执行；先解决 GitHub 给出的具体原因，或采用以下本地构建和网页上传方式。
+- 依赖安装、测试或 ZIP 验证失败：先修复失败项，再创建新版本标签；不要跳过验证发布源码 ZIP。
+
+无法使用 Actions 时，手动发布步骤：
+
+1. 检出计划发布的标签，在该提交运行 `npm ci --ignore-scripts`、`python3 scripts/check_release.py v0.1.0` 和 `npm run package`（其他版本替换标签）。全部成功后得到 `out/External-Storage-Guard.zip`。
+2. 在 GitHub 仓库 **Releases → Draft a new release**，选择同一标签，上传上述 ZIP 作为独立 Release 资产，文件名保持 **External-Storage-Guard.zip**。正式版发布并标记为 latest；预发布勾选 prerelease。
+3. 检查 Release 页面存在该资产，打开上面的 `latest/download` 直链并下载验证。不要选择页面自动附带的 Source code ZIP。
+
+已在本机授权 GitHub CLI 的维护者也可执行以下命令（不能用它绕过组织策略）：
+
+```bash
+gh release create v0.1.0 out/External-Storage-Guard.zip --verify-tag --title "External Storage Guard v0.1.0" --generate-notes --latest
+```
+
+若 Release 已存在，使用 `gh release upload v0.1.0 out/External-Storage-Guard.zip --clobber` 补传资产，并在网页确认它不是草稿且是所需的 latest 正式版。
 
 ## 实机验收清单
 

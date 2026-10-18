@@ -32,7 +32,7 @@
 - Steam Deck、不同 USB HDD / SSD 与硬盘盒的总线 / ROTA 报告差异。
 - 游戏模式手柄焦点、长日志滚动、筛选、分页、本地时间显示。
 - 真实设备安全断开 / 重连、多设备并用，以及打开 / 关闭菜单时的性能和耗电。
-- GitHub Actions 工作流已编写，本次未在 GitHub 执行；尚未发布到插件商店。
+- 初版 GitHub Actions 检查已[成功运行](https://github.com/ohxiaoguang/decky-external-storage-guard/actions/runs/39119336239)；尚未发布到插件商店。
 
 ## 已知保守限制
 
@@ -41,3 +41,10 @@
 纯 `USB disconnect` 按信息展示，因为它不能证明意外拔出；真实 I/O、offline、文件系统或异常只读仍按严重展示。插件不主动测试故障或执行任何恢复动作。
 
 具体构建、ZIP 安装与 8 项 ROG Ally X 验收步骤见 README。
+
+## 自动发布流程补充验证
+
+- 本地 `npm run package` 通过：现为 47 项单元测试（新增标签 / package / lock 版本校验），严格类型检查、Rollup 构建、ZIP 检查及包内入口隔离加载均通过。
+- `actionlint` v1.7.7 对检查与发布两个工作流验证通过。
+- 安装包统一为 `out/External-Storage-Guard.zip`，内部唯一顶层目录仍为 `external-storage-guard/`，包含编译后的 `dist/index.js`、manifest、Python 后端与完整 `storage_guard` 模块，不包含测试或依赖目录。
+- 标签工作流在构建验证通过后，以 `contents: write` 的独立任务发布 Release 安装资产与 SHA-256；README 包含 latest 下载直链、URL 安装和手动后备步骤。具体远程执行结果以对应标签的 Actions 记录和 Release 资产为准。

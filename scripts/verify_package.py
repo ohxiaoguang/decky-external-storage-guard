@@ -5,10 +5,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
-
-ROOT = Path(__file__).resolve().parent.parent
-VERSION = json.loads((ROOT / "package.json").read_text())["version"]
-ARCHIVE = ROOT / "out" / f"external-storage-guard-v{VERSION}.zip"
+from package import ROOT, ARCHIVE
 
 BACKEND_CHECK = """
 import asyncio, importlib.util, pathlib, sys

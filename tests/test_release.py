@@ -1,0 +1,21 @@
+import unittest
+from scripts.check_release import validate_release
+
+
+class ReleaseVersionTests(unittest.TestCase):
+    def lock(self, version):
+        return {"version": version, "packages": {"": {"version": version}}}
+
+    def test_matching_stable_and_prerelease(self):
+        for version in ("0.1.0", "0.2.0-beta.1"):
+            validate_release(f"v{version}", {"version": version}, self.lock(version))
+
+    def test_wrong_tag_cannot_publish_other_package_version(self):
+        for tag in ("v0.2.0", "0.1.0", "vanything"):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                validate_release(tag, {"version": "0.1.0"}, self.lock("0.1.0"))
+
+    def test_stale_lockfile_root_or_package_rejected(self):
+        for lock in ({}, {"version": "0.0.1"}, {"version": "0.1.0", "packages": {"": {"version": "0.0.1"}}}):
+            with self.subTest(lock=lock), self.assertRaises(ValueError):
+                validate_release("v0.1.0", {"version": "0.1.0"}, lock)

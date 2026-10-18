@@ -1,0 +1,81 @@
+name: Build and release Decky plugin
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test, build and verify installation ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check tag and package versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/check_release.py "$RELEASE_TAG"
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck, test, compile, package and verify isolated imports
+        run: npm run package
+      - name: Generate checksum
+        working-directory: out
+        run: sha256sum External-Storage-Guard.zip > External-Storage-Guard.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decky-release-package
+          path: |
+            out/External-Storage-Guard.zip
+            out/External-Storage-Guard.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish verified package to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: decky-release-package
+          path: release
+      - name: Check downloaded package checksum
+        working-directory: release
+        run: sha256sum --check External-Storage-Guard.zip.sha256
+      - name: Upload installation assets and publish
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" External-Storage-Guard.zip External-Storage-Guard.zip.sha256 --clobber
+          else
+            gh release create "$RELEASE_TAG" External-Storage-Guard.zip External-Storage-Guard.zip.sha256 \
+              --verify-tag --draft --title "External Storage Guard $RELEASE_TAG" --generate-notes
+          fi
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            gh release edit "$RELEASE_TAG" --prerelease=true --draft=false
+          else
+            gh release edit "$RELEASE_TAG" --prerelease=false --latest --draft=false
+          fi

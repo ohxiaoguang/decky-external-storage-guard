@@ -1,5 +1,9 @@
 name: Check and package
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -18,5 +22,6 @@ jobs:
       - run: npm run package
       - uses: actions/upload-artifact@v4
         with:
-          name: external-storage-guard-v0.1.0
-          path: out/*.zip
+          name: decky-install-package
+          path: out/External-Storage-Guard.zip
+          if-no-files-found: error
