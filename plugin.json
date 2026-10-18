@@ -10,6 +10,6 @@
       "storage",
       "diagnostics"
     ],
-    "description": "监控 MicroSD / USB 异常与休眠唤醒，复制脱敏诊断报告、导出 TXT，支持确认后安全重新挂载。"
+    "description": "外部存储分区安全卸载和挂载，直接查看与复制原始系统日志。"
   }
 }

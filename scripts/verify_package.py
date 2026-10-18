@@ -16,8 +16,9 @@ spec.loader.exec_module(module)
 async def verify():
     plugin = module.Plugin()
     assert callable(plugin.get_snapshot)
-    assert callable(plugin.remount_partition)
-    assert callable(plugin.get_report) and callable(plugin.export_report)
+    assert callable(plugin.mount_partition) and callable(plugin.unmount_partition)
+    assert callable(plugin.get_logs)
+    assert not hasattr(plugin, "remount_partition")
     await plugin._main()
     await plugin._unload()
     await plugin._uninstall()
@@ -30,6 +31,7 @@ def verify():
     with ZipFile(ARCHIVE) as archive, TemporaryDirectory() as directory:
         names = archive.namelist()
         assert not any(n.endswith("/operation_store.py") or n.endswith("remount-state.json") or n.endswith("remount-audit.json") for n in names)
+        assert not any(n.endswith("/" + f + ".py") for n in names for f in ("events", "rules", "report", "export", "suspend", "hardware"))
         assert names and all(n.startswith("external-storage-guard/") and ".." not in Path(n).parts for n in names)
         assert sum(n.endswith("/plugin.json") for n in names) == 1
         assert not any(part in {"tests", "node_modules", "__pycache__"} for n in names for part in Path(n).parts)
@@ -42,8 +44,7 @@ def verify():
             assert (plugin / file).is_file(), file
         subprocess.run([sys.executable, "-I", "-c", BACKEND_CHECK, str(plugin)], cwd=directory, check=True, timeout=10)
         subprocess.run(["node", str(ROOT / "tests/bundle-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=10)
-        subprocess.run(["node", str(ROOT / "tests/remount-ui-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=10)
-        subprocess.run(["node", str(ROOT / "tests/report-ui-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=15)
+        subprocess.run(["node", str(ROOT / "tests/ui-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=20)
     print(f"ZIP structure and isolated imports: OK ({ARCHIVE.stat().st_size} bytes)")
 
 

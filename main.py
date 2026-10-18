@@ -1,4 +1,4 @@
-"""Decky API v1: diagnostics and explicitly confirmed safe UDisks remounts."""
+"""Decky API v1: raw journal and safe independent UDisks mount/unmount."""
 from pathlib import Path
 import sys
 
@@ -15,25 +15,22 @@ class Plugin:
     def __init__(self):
         self.service = Service()
 
-    async def get_snapshot(self, window: str = "boot") -> dict:
-        return await self.service.snapshot(window)
+    async def get_snapshot(self) -> dict:
+        return await self.service.snapshot()
 
-    async def remount_partition(self, token: str) -> dict:
-        return await self.service.remount(token)
+    async def unmount_partition(self, token: str) -> dict:
+        return await self.service.operate("unmount", token)
 
-    async def get_report(self, window: str = "boot") -> dict:
+    async def mount_partition(self, token: str) -> dict:
+        return await self.service.operate("mount", token)
+
+    async def get_logs(self) -> dict:
         try:
-            return await self.service.generate_report(window)
+            return await self.service.logs()
         except ReadFailure as exc:
-            return {"status": exc.status, "message": exc.message}
+            return {"status": exc.status, "message": exc.message, "text": "", "limited": False}
         except (OSError, ValueError, TypeError) as exc:
-            return {"status": "report_failed", "message": f"报告生成失败：{type(exc).__name__}"}
-
-    async def export_report(self, report_id: str) -> dict:
-        try:
-            return await self.service.export_report(report_id)
-        except ReadFailure as exc:
-            return {"status": exc.status, "message": exc.message}
+            return {"status": "read_failed", "message": f"日志读取失败：{type(exc).__name__}", "text": "", "limited": False}
 
     async def _main(self):
         pass
