@@ -90,6 +90,14 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
         with patch("storage_guard.journal.run", AsyncMock(side_effect=ReadFailure("output_limit", "cap"))):
             self.assertEqual((await read_journal())["message"], "日志已截断：读取输出超过上限，无法安全显示不完整 JSON")
 
+    async def test_partial_journal_access_is_permission_error_not_no_logs(self):
+        for contents in ("", json.dumps(row("mmc0: partial"))):
+            with patch("storage_guard.journal.run", AsyncMock(return_value=Output(0, contents,
+                    "Hint: You are currently not seeing messages from other users and the system."))):
+                with self.assertRaises(ReadFailure) as caught:
+                    await read_journal()
+                self.assertEqual(caught.exception.status, "permission_denied")
+
     async def test_source_timestamp_and_missing_message_are_not_fabricated(self):
         result, _ = await self.read([row("mmc0: raw", _SOURCE_MONOTONIC_TIMESTAMP="123"), {"_BOOT_ID": "actual"}])
         self.assertIn("1970-01-01 00:00:01.000 kernel: mmc0: raw", result["text"])

@@ -4,12 +4,18 @@ import sys
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 from storage_guard.commands import run, require_success, Output, ReadFailure
 
 
 class IOTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # These tests isolate bounded I/O. A separate process tests real non-root identity.
+        patcher = patch("storage_guard.commands.current_user", return_value=SimpleNamespace(pw_name="tester", pw_dir="/tmp"))
+        patcher.start(); self.addCleanup(patcher.stop)
+
     async def test_subprocess_success(self):
         output = await run([sys.executable, "-c", "print('ok')"])
         self.assertEqual(require_success(output, "test"), "ok\n")

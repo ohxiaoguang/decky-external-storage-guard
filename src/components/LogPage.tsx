@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { callable } from "@decky/api";
-import { DialogButton, Focusable, GamepadButton, Navigation, ReactRouter } from "@decky/ui";
+import { DialogButton, Focusable, GamepadButton, Navigation } from "@decky/ui";
 import { copyDiagnostic } from "../clipboard";
 import { Logs } from "../types";
 
@@ -17,14 +17,20 @@ export function LogPage() {
   const running = useRef(false);
   const alive = useRef(true);
   const scroll = useRef<HTMLDivElement>(null);
-  const location = ReactRouter.useLocation() as { pathname: string };
-  const path = useRef(location.pathname);
-  path.current = location.pathname;
   const leaving = useRef(false);
   const back = () => {
-    if (!alive.current || leaving.current) return;
-    leaving.current = true;
-    Navigation.NavigateBack();
+    if (!alive.current) return false;
+    if (leaving.current) return true;
+    try {
+      if (typeof Navigation?.NavigateBack !== "function") throw new Error("返回接口不可用，请通过 Steam 菜单退出此页");
+      leaving.current = true;
+      Navigation.NavigateBack();
+      return true;
+    } catch (error) {
+      leaving.current = false;
+      setMessage(`返回失败：${error instanceof Error ? error.message : "导航不可用"}`);
+      return false;
+    }
   };
   const refresh = async () => {
     if (running.current || !alive.current) return;
@@ -32,10 +38,12 @@ export function LogPage() {
     try {
       const result = await getLogs();
       if (!alive.current) return;
+      if (!result || typeof result.status !== "string" || typeof result.text !== "string" || typeof result.message !== "string")
+        throw new Error("日志接口返回无效，请检查插件版本");
       if (result.status === "ok" || result.status === "no_logs") {
         setText(result.text); setLimited(result.limited); setMessage(result.message === "日志已截断" ? "" : result.message);
       } else { if (result.limited) setLimited(true); setMessage(result.message || "日志读取失败"); }
-    } catch { if (alive.current) setMessage("日志读取失败；保留上次内容"); }
+    } catch (error) { if (alive.current) setMessage(`日志读取失败：${error instanceof Error ? error.message.slice(0, 300) : "通信异常"}；保留上次内容`); }
     finally { running.current = false; if (alive.current) setBusy(false); }
   };
   const copy = async () => {
@@ -47,12 +55,11 @@ export function LogPage() {
   };
   useEffect(() => {
     alive.current = true;
-    const stop = () => { if (path.current === LOG_ROUTE) back(); alive.current = false; };
+    const stop = () => { alive.current = false; };
     cleanups.add(stop); void refresh();
     return () => { alive.current = false; cleanups.delete(stop); };
   }, []);
-  useEffect(() => { if (location.pathname === LOG_ROUTE) leaving.current = false; }, [location.pathname]);
-  return <Focusable onCancel={event => { event.preventDefault(); event.stopPropagation(); back(); }}
+  return <Focusable onCancel={event => { if (back()) { event.preventDefault(); event.stopPropagation(); } }}
     style={{ position: "absolute", inset: 0, boxSizing: "border-box", display: "flex", flexDirection: "column", gap: 16,
       padding: "clamp(48px, 7vh, 80px) clamp(16px, 4vw, 64px) clamp(48px, 8vh, 88px)", overflow: "hidden", background: "#101822", color: "#dce1e7" }}>
       <h2 style={{ margin: 0, fontSize: "clamp(18px, 2vw, 26px)" }}>External Storage Guard · 系统日志</h2>
@@ -63,7 +70,7 @@ export function LogPage() {
       </Focusable>
       {(message || limited) && <div role="status" style={{ fontSize: 12 }}>{limited ? "日志已截断 · " : ""}{message}</div>}
       <Focusable ref={scroll} tabIndex={0} style={{ overflowY: "auto", overflowX: "hidden", flex: 1, minHeight: 0, minWidth: 0, touchAction: "pan-y", background: "#080e16", padding: 16 }}
-        onCancel={event => { event.preventDefault(); event.stopPropagation(); back(); }}
+        onCancel={event => { if (back()) { event.preventDefault(); event.stopPropagation(); } }}
         onGamepadDirection={event => {
           const element = scroll.current;
           const amount = event.detail.button === GamepadButton.DIR_DOWN ? 120 : event.detail.button === GamepadButton.DIR_UP ? -120 : 0;

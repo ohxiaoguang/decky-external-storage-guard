@@ -20,6 +20,13 @@ class ReleaseVersionTests(unittest.TestCase):
             with self.subTest(lock=lock), self.assertRaises(ValueError):
                 validate_release("v0.1.0", {"version": "0.1.0"}, lock)
 
+    def test_install_manifest_requests_no_root_permissions(self):
+        import json
+        from pathlib import Path
+        manifest = json.loads((Path(__file__).resolve().parents[1] / "plugin.json").read_text())
+        self.assertEqual(manifest["flags"], [])
+        self.assertEqual(manifest["api_version"], 1)
+
     def test_release_asset_filename_stays_compatible_with_update_link(self):
         from pathlib import Path
         from scripts.package import ARCHIVE

@@ -27,8 +27,9 @@ const navigate = path => { currentPath = path; history.push(path); navigation.pu
 const goBack = () => { if (history.length > 1) history.pop(); currentPath = history.at(-1); navigation.push(["back", currentPath]); };
 globalThis.DFL = { staticClasses: { Title: "title" }, PanelSection: "PanelSection", PanelSectionRow: "PanelSectionRow", ButtonItem: "ButtonItem", DialogButton: "DialogButton", Focusable: "Focusable", GamepadButton: { DIR_UP: 9, DIR_DOWN: 10 },
   Router: { CloseSideMenus() { quickVisible = false; navigation.push(["close"]); }, Navigate: navigate },
-  Navigation: { NavigateBack: goBack }, ReactRouter: { useLocation: () => ({ pathname: currentPath }) },
+  Navigation: { NavigateBack: goBack },
 };
+Object.defineProperty(globalThis.DFL, "ReactRouter", { get() { throw new Error("Steam runtime does not expose ReactRouter hooks"); } });
 const realTimeout = globalThis.setTimeout, realClearTimeout = globalThis.clearTimeout;
 const confirmationTimers = new Set();
 globalThis.setTimeout = (callback, ms, ...args) => {
@@ -42,7 +43,7 @@ const part = { name: "mmcblk0p1", path: "/dev/mmcblk0p1", size: 123456789, files
 const device = { id: "/dev/mmcblk0", model: "MicroSD fixture", kind: "SD", size: 123456789, mounted: true, readOnly: false, partitions: [part] };
 let snapshot = { devices: [device], deviceStatus: { status: "ok", message: "" }, lastOperation: null };
 const calls = [], copied = [];
-let completeOperation, failSnapshot = false, clipboardOK = true, focusRestored = false;
+let completeOperation, failSnapshot = false, failLogs = false, clipboardOK = true, focusRestored = false;
 let logResponse = { status: "ok", message: "日志已截断", limited: true, text: '2026-10-19 00:37:09.557 udisksd: raw 中文\n"); globalThis.compromised = true; //\nTuning failed' };
 globalThis.window = { __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: {
   connect: version => ({ _version: version,
@@ -52,7 +53,7 @@ globalThis.window = { __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_d
     callable: method => async (...args) => {
     calls.push({ method, args });
     if (method === "get_snapshot") { if (failSnapshot) throw new Error("offline"); return snapshot; }
-    if (method === "get_logs") return logResponse;
+    if (method === "get_logs") { if (failLogs) throw new Error("journal RPC unavailable"); return logResponse; }
     return new Promise(resolve => { completeOperation = resolve; });
   }, executeInTab: async (tab, async, code) => {
     assert.equal(async, false);
@@ -74,7 +75,8 @@ const named = (tree, name) => find(tree, node => node.type?.name === name)[0];
 const button = (tree, label) => find(tree, node => ["ButtonItem", "DialogButton"].includes(node.type) && node.props.children === label)[0];
 const text = tree => Array.isArray(tree) ? tree.map(text).join(" ") : tree && typeof tree === "object" ? text(tree.props?.children) : String(tree ?? "");
 const flush = () => new Promise(resolve => setImmediate(resolve));
-const plugin = (await import(pathToFileURL(process.argv[2]).href)).default();
+const createPlugin = (await import(pathToFileURL(process.argv[2]).href)).default;
+const plugin = createPlugin();
 assert.equal(plugin.alwaysRender, true, "official flag keeps sidebar content mounted when closed");
 assert.equal(routes.get(LOG_ROUTE)?.name, "LogPage");
 const app = new Host(); app.render(plugin.content.type, {}); await flush();
@@ -113,7 +115,10 @@ assert.ok(button(renderCard(), "卸载"), "switching target cancels confirmation
 cardTree = arm();
 const beforeLogs = card.props.device;
 const leftPageConfirm = button(cardTree, "确认卸载").props.onClick;
-button(tree, "查看日志").props.onClick();
+const enterLogs = button(tree, "查看日志").props.onClick;
+const entriesBefore = navigation.filter(n => n[0] === "navigate").length;
+enterLogs(); enterLogs();
+assert.equal(navigation.filter(n => n[0] === "navigate").length, entriesBefore + 1);
 assert.deepEqual(navigation.slice(-2), [["close"], ["navigate", LOG_ROUTE]]);
 assert.ok(named(render(), "DeviceCard"), "home stays mounted behind closed sidebar");
 assert.equal(named(render(), "LogPage"), undefined, "logs are not rendered inside sidebar");
@@ -217,6 +222,21 @@ assert.equal(copied.length, 1); assert.equal(copied[0], logResponse.text); asser
 logTree = renderLog(); assert.match(text(logTree), /已复制全部显示日志/); assert.match(text(logTree), /日志已截断/);
 clipboardOK = false; button(logTree, "复制").props.onClick(); await flush(); logTree = renderLog(); assert.match(text(logTree), /复制失败/); clipboardOK = true;
 const originalLog = logResponse.text;
+failLogs = true; button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
+assert.match(text(logTree), /journal RPC unavailable/); assert.ok(text(logTree).includes(originalLog)); failLogs = false;
+logResponse = { status: "ok", text: { invalid: true } };
+button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
+assert.match(text(logTree), /日志接口返回无效/); assert.ok(text(logTree).includes(originalLog));
+const savedBack = globalThis.DFL.Navigation.NavigateBack;
+globalThis.DFL.Navigation.NavigateBack = undefined;
+button(logTree, "返回").props.onClick(); logTree = renderLog(); assert.match(text(logTree), /返回接口不可用/);
+let blockedNativeBack = false;
+logTree.props.onCancel({ preventDefault() { blockedNativeBack = true; }, stopPropagation() { blockedNativeBack = true; } });
+assert.equal(blockedNativeBack, false, "unavailable navigation does not swallow Steam's native cancel");
+globalThis.DFL.Navigation.NavigateBack = () => { throw new Error("navigation unavailable"); };
+button(logTree, "返回").props.onClick(); logTree = renderLog(); assert.match(text(logTree), /navigation unavailable/);
+globalThis.DFL.Navigation.NavigateBack = savedBack;
+
 logResponse = { status: "permission_denied", message: "无权限", text: "", limited: false };
 button(logTree, "刷新").props.onClick(); button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
 assert.match(text(logTree), /无权限/); assert.ok(text(logTree).includes(originalLog), "failed log read preserves displayed raw text");
@@ -254,13 +274,33 @@ assert.equal(copied.at(-1), "https://github.com/ohxiaoguang/decky-external-stora
 assert.doesNotMatch(text(updateTree), /https:\/\//);
 cardTree = arm(); const afterDismount = button(cardTree, "确认卸载").props.onClick;
 const operationsBeforeDismount = operationCount();
-// Unloading while on the full-screen route exits it and unregisters exactly once.
+// Plugin cleanup unregisters exactly once and never navigates from stale route assumptions.
 button(tree, "查看日志").props.onClick(); render();
 const unloadingLogHost = new Host(); unloadingLogHost.render(logComponent, {}); await flush();
-plugin.onDismount(); afterDismount(); app.unmount(); updateHost.unmount(); unloadingLogHost.unmount();
-assert.equal(currentPath, "/library/home"); assert.equal(routes.size, 0);
-assert.deepEqual(navigation.slice(-2), [["back", "/library/home"], ["remove", LOG_ROUTE]]);
+const staleBack = button(unloadingLogHost.render(logComponent, {}), "返回").props.onClick;
+const navBeforeUnload = navigation.filter(n => n[0] !== "remove").length;
+plugin.onDismount(); plugin.onDismount(); afterDismount(); staleBack();
+app.unmount(); updateHost.unmount(); unloadingLogHost.unmount();
+assert.equal(routes.size, 0);
+assert.equal(navigation.filter(n => n[0] !== "remove").length, navBeforeUnload, "cleanup never navigates");
+assert.equal(navigation.filter(n => n[0] === "remove").length, 1);
 assert.equal(navigation.filter(n => n[0] === "register").length, 1, "all page operations reused one plugin initialization");
 assert.equal(operationCount(), operationsBeforeDismount); assert.equal(confirmationTimers.size, 0);
+// A fresh plugin registration survives repeated cleanup of the old instance.
+const reloaded = createPlugin();
+assert.equal(routes.size, 1); plugin.onDismount(); assert.equal(routes.size, 1);
+failLogs = true;
+const reloadHost = new Host(); reloadHost.render(routes.get(LOG_ROUTE), {}); await flush();
+let reloadTree = reloadHost.render(routes.get(LOG_ROUTE), {});
+assert.match(text(reloadTree), /journal RPC unavailable/);
+assert.ok(button(reloadTree, "返回"));
+failLogs = false; button(reloadTree, "刷新").props.onClick(); await flush();
+reloadTree = reloadHost.render(routes.get(LOG_ROUTE), {});
+assert.match(text(reloadTree), /actual raw mount/);
+button(reloadTree, "返回").props.onClick(); reloadHost.unmount();
+const afterExplicitBack = navigation.filter(n => n[0] === "back").length;
+reloaded.onDismount(); reloaded.onDismount();
+assert.equal(routes.size, 0);
+assert.equal(navigation.filter(n => n[0] === "back").length, afterExplicitBack);
 globalThis.setTimeout = realTimeout; globalThis.clearTimeout = realClearTimeout;
-console.log("Inline unmount first/second click / cancel / expiry / state changes, verified results, stable App, true fullscreen route / QAM close / back / unregister / refresh / exact copy / gamepad scroll: OK");
+console.log("Inline unmount first/second click / cancel / expiry / state changes, verified results, stable App, no ReactRouter hooks, fullscreen route / QAM close / guarded back / non-navigating unregister / refresh / exact copy / gamepad scroll: OK");

@@ -20,61 +20,36 @@ class Output:
     stderr: str
 
 
-@dataclass(frozen=True)
-class DesktopUser:
-    name: str
-    uid: int
-    gid: int
-    home: str
-    groups: tuple[int, ...]
-
-
-def desktop_user() -> DesktopUser:
-    """Decky supplies the host user separately from its root plugin identity."""
+def current_user():
+    """Verify the existing non-root process; environment is only a cross-check."""
     try:
-        name, home = os.environ.get("DECKY_USER", ""), os.environ.get("DECKY_USER_HOME", "")
-        if not name or not home or not Path(home).is_absolute():
-            raise ValueError("missing Decky host user")
-        account = pwd.getpwnam(name)
-        if (account.pw_name != name or account.pw_uid <= 0 or account.pw_gid <= 0 or
-                account.pw_dir != home or home in ("/", "/root") or
-                pwd.getpwuid(account.pw_uid).pw_name != name):
-            raise ValueError("untrusted Decky host user")
-        groups = tuple(sorted(set(os.getgrouplist(name, account.pw_gid))))
-        if account.pw_gid not in groups or any(not isinstance(g, int) or g < 0 for g in groups):
-            raise ValueError("invalid user groups")
-        return DesktopUser(name, account.pw_uid, account.pw_gid, home, groups)
+        uid, gid = os.getuid(), os.getgid()
+        if uid <= 0 or gid <= 0 or os.getresuid() != (uid,) * 3 or os.getresgid() != (gid,) * 3:
+            raise ValueError("not an ordinary user process")
+        account = pwd.getpwuid(uid)
+        if (account.pw_uid != uid or account.pw_gid != gid or not Path(account.pw_dir).is_absolute() or account.pw_dir in ("/", "/root") or
+                os.environ.get("DECKY_USER") != account.pw_name or
+                os.environ.get("DECKY_USER_HOME") != account.pw_dir or os.environ.get("HOME") != account.pw_dir):
+            raise ValueError("process does not match Decky host user")
+        return account
     except (KeyError, ValueError, OSError) as exc:
-        raise ReadFailure("unsupported_permissions", "无法确认 Decky 桌面用户身份，已停止挂载；不会回退为 root") from exc
+        raise ReadFailure("permission_denied", "无法确认当前普通用户身份；请确认插件已更新并以非 root 模式重新加载") from exc
 
 
-async def run(argv: list[str], timeout: float = 8, limit: int = 8 * 1024 * 1024,
-              user: DesktopUser | None = None) -> Output:
-    options = {}
-    env = {**os.environ, "LC_ALL": "C", "SYSTEMD_COLORS": "0"}
-    if user is not None:
-        if user.uid <= 0 or user.gid <= 0:
-            raise ReadFailure("permission_denied", "禁止以 root 身份执行桌面用户挂载")
-        # Popen performs setgroups/setregid/setreuid in the child before exec.
-        # Do not change credentials of the long-lived root plugin or use preexec_fn.
-        options = {"user": user.uid, "group": user.gid, "extra_groups": list(user.groups), "cwd": "/"}
-        if os.geteuid() != 0:
-            if (os.getresuid() != (user.uid,) * 3 or os.getresgid() != (user.gid,) * 3 or
-                    set(os.getgroups()) | {user.gid} != set(user.groups)):
-                raise ReadFailure("permission_denied", "当前进程无法切换为已确认的桌面用户，已停止挂载")
-            options = {"cwd": "/"}  # Already that exact user; unprivileged setgroups would fail.
-        env = {"PATH": "/usr/bin:/bin", "HOME": user.home, "USER": user.name, "LOGNAME": user.name,
-               "LC_ALL": "C", "SYSTEMD_COLORS": "0"}
+async def run(argv: list[str], timeout: float = 8, limit: int = 8 * 1024 * 1024) -> Output:
+    user = current_user()
+    # Keep the process's real UID/GID and actual supplementary groups unchanged.
+    env = {"PATH": "/usr/bin:/bin", "HOME": user.pw_dir, "USER": user.pw_name, "LOGNAME": user.pw_name,
+           "LC_ALL": "C", "SYSTEMD_COLORS": "0"}
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=env, **options,
+            env=env, cwd="/",
         )
     except FileNotFoundError as exc:
         raise ReadFailure("missing_command", f"未安装系统命令：{argv[0]}") from exc
     except PermissionError as exc:
-        message = f"无法以桌面用户身份执行 {argv[0]}：权限不足，已停止且不会回退为 root" if user else f"没有执行 {argv[0]} 的权限"
-        raise ReadFailure("permission_denied", message) from exc
+        raise ReadFailure("permission_denied", f"当前用户没有执行 {argv[0]} 的权限；不会尝试提权") from exc
 
     async def read(stream, cap):
         data = bytearray()
