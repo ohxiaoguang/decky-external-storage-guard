@@ -1,4 +1,4 @@
-"""Decky API v1 backend. No web server and no disk/system mutations."""
+"""Decky API v1: diagnostics and explicitly confirmed safe UDisks remounts."""
 from pathlib import Path
 import sys
 
@@ -16,6 +16,9 @@ class Plugin:
 
     async def get_snapshot(self, window: str = "boot") -> dict:
         return await self.service.snapshot(window)
+
+    async def remount_partition(self, token: str) -> dict:
+        return await self.service.remount(token)
 
     async def _main(self):
         pass

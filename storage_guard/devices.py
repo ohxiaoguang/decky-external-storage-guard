@@ -5,7 +5,7 @@ from pathlib import Path
 from .commands import run, require_success, ReadFailure
 
 LSBLK = ["lsblk", "--json", "--bytes", "--tree", "--output",
-         "NAME,KNAME,PATH,TYPE,SIZE,MODEL,TRAN,RM,RO,ROTA,FSTYPE,MOUNTPOINTS,MAJ:MIN"]
+         "NAME,KNAME,PATH,TYPE,SIZE,MODEL,TRAN,RM,RO,ROTA,FSTYPE,MOUNTPOINTS,MAJ:MIN,UUID,PARTUUID,PARTTYPE"]
 FINDMNT = ["findmnt", "--json", "--list", "--output", "SOURCE,TARGET,FSTYPE,OPTIONS,MAJ:MIN"]
 SYSTEM_MOUNTS = {"/", "/usr", "/var", "/home", "/boot", "/efi", "/boot/efi"}
 
@@ -25,7 +25,13 @@ def sysfs_facts(name: str, root: Path = Path("/sys/class/block")) -> dict:
             return (base / relative).read_text().strip()
         except OSError:
             return ""
+    try:
+        holders = sorted(p.name for p in (base / "holders").iterdir())
+    except OSError:
+        holders = None
     return {"topology": topology, "card_type": read("device/type"),
+            "diskseq": read("diskseq"), "dev": read("dev"),
+            "partition": read("partition"), "holders": holders,
             "model": read("device/name") or read("device/model")}
 
 
@@ -70,14 +76,19 @@ def discover(lsblk: dict, mounts: dict, facts: dict[str, dict]) -> list[dict]:
             if node is not disk and node.get("type") != "part":
                 continue
             path = node.get("path") or f'/dev/{node["kname"]}'
+            part_facts = facts.get(node.get("kname") or node["name"], {})
             matching = [m for m in relevant if (node.get("maj:min") and m.get("maj:min") == node["maj:min"])
                         or m.get("source", "").split("[")[0] == path]
             parts.append({
                 "name": node.get("kname") or node["name"], "path": path,
                 "size": int(node.get("size") or 0), "filesystem": node.get("fstype") or None,
                 "readOnly": truth(node.get("ro")),
+                "type": node.get("type"), "uuid": node.get("uuid"),
+                "partitionUuid": node.get("partuuid"), "partitionType": node.get("parttype"),
+                "majorMinor": node.get("maj:min"), "sysfs": part_facts,
                 "mounts": [{"target": m.get("target", ""), "filesystem": m.get("fstype"),
-                            "readOnly": "ro" in (m.get("options") or "").split(",")} for m in matching],
+                            "readOnly": "ro" in (m.get("options") or "").split(","),
+                            "options": m.get("options") or ""} for m in matching],
             })
         controller = re.search(r"/mmc_host/(mmc\d+)(?:/|$)", topology)
         scsi = re.findall(r"/(\d+:\d+:\d+:\d+)(?:/|$)", topology)
@@ -86,6 +97,9 @@ def discover(lsblk: dict, mounts: dict, facts: dict[str, dict]) -> list[dict]:
             "model": (disk.get("model") or info.get("model") or "").strip(),
             "size": int(disk.get("size") or 0), "kind": kind,
             "transport": transport or None, "topology": topology,
+            "sysfs": info,
+            "managementBlocked": any(n.get("type") not in ("disk", "part") or
+                                     n.get("fstype") == "swap" or "[SWAP]" in (n.get("mountpoints") or []) for n in nodes),
             "controller": controller[1] if controller else None,
             "usbPort": usb[-1] if usb else None, "scsiAddress": scsi[-1] if scsi else None,
             "partitions": parts, "mounted": any(p["mounts"] for p in parts),
@@ -102,7 +116,7 @@ async def scan() -> tuple[list[dict], list[str], list[str]]:
     except (ReadFailure, ValueError) as exc:
         # Mount options are needed to distinguish read-only mounts from block RO.
         raise ReadFailure(getattr(exc, "status", "read_failed"), f"无法确认挂载状态：{exc}") from exc
-    facts = {n["kname"]: sysfs_facts(n["kname"]) for n in raw.get("blockdevices", []) if n.get("kname")}
+    facts = {n["kname"]: sysfs_facts(n["kname"]) for n in flatten(raw.get("blockdevices", [])) if n.get("kname")}
     devices = discover(raw, mounted, facts)
     external_names = {p["name"] for d in devices for p in d["partitions"]}
     excluded = [n.get("kname") for n in flatten(raw.get("blockdevices", []))

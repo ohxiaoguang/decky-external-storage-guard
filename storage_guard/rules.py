@@ -12,6 +12,7 @@ class Rule:
 
 
 RULES = (
+    Rule("filesystem_check", "Error", "发现文件系统检查要求或日志中止；重挂载不能修复文件系统", r"filesystem check required|(?:run|requires?|needs?).*(?:fsck|file\s*system check)|(?:journal.*abort|abort.*journal)|\bemergency_ro\b"),
     Rule("cache_flush", "Error", "存储缓存刷新失败，可能有写入未完成", r"error.*writing Cache Flush bit|(?:cache|synchronize)\s+.*(?:flush|cache).*fail|failed.*(?:flush|synchronize cache)"),
     Rule("io_error", "Error", "设备发生实际读写失败", r"\bI/O error\b|\b(?:Buffer I/O|blk_update_request).*error|critical (?:medium|target) error|\bFAILED Result:"),
     Rule("filesystem", "Error", "文件系统报告错误", r"(?:EXT4-fs|exfat(?:-fs)?|ntfs3?|NTFS)(?:\s|\(|:).*(?:\berror\b|\bcorrupt|\bfail|\babort|\binconsistent)"),

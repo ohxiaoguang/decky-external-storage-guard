@@ -16,6 +16,7 @@ spec.loader.exec_module(module)
 async def verify():
     plugin = module.Plugin()
     assert callable(plugin.get_snapshot)
+    assert callable(plugin.remount_partition)
     await plugin._main()
     await plugin._unload()
     await plugin._uninstall()
@@ -39,6 +40,7 @@ def verify():
             assert (plugin / file).is_file(), file
         subprocess.run([sys.executable, "-I", "-c", BACKEND_CHECK, str(plugin)], cwd=directory, check=True, timeout=10)
         subprocess.run(["node", str(ROOT / "tests/bundle-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=10)
+        subprocess.run(["node", str(ROOT / "tests/remount-ui-smoke.mjs"), str(plugin / "dist/index.js")], cwd=directory, check=True, timeout=10)
     print(f"ZIP structure and isolated imports: OK ({ARCHIVE.stat().st_size} bytes)")
 
 
