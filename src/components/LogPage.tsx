@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { callable } from "@decky/api";
-import { DialogButton, Focusable, GamepadButton, ModalRoot } from "@decky/ui";
+import { DialogButton, Focusable, GamepadButton } from "@decky/ui";
 import { copyDiagnostic } from "../clipboard";
 import { Logs } from "../types";
 
 const getLogs = callable<[], Logs>("get_logs");
-export function LogModal({ closeModal }: { closeModal: () => void }) {
+export function LogPage({ back }: { back: () => void }) {
   const [text, setText] = useState("");
   const [message, setMessage] = useState("");
   const [limited, setLimited] = useState(false);
@@ -33,16 +33,16 @@ export function LogModal({ closeModal }: { closeModal: () => void }) {
     finally { running.current = false; if (alive.current) setBusy(false); }
   };
   useEffect(() => { alive.current = true; void refresh(); return () => { alive.current = false; }; }, []);
-  return <ModalRoot bAllowFullSize bHideCloseIcon onCancel={closeModal} closeModal={closeModal}>
-    <div style={{ width: "92vw", height: "84vh", maxWidth: "none", display: "flex", flexDirection: "column", gap: 10 }}>
+  return <Focusable onCancel={event => { event.preventDefault(); event.stopPropagation(); back(); }}
+    style={{ width: "100%", height: "calc(100vh - 180px)", minHeight: 240, boxSizing: "border-box", display: "flex", flexDirection: "column", gap: 10, padding: "0 8px", overflow: "hidden" }}>
       <Focusable flow-children="row" style={{ display: "flex", gap: 8 }}>
-        <DialogButton disabled={busy} onClick={() => void refresh()}>刷新</DialogButton>
-        <DialogButton disabled={busy || !text} onClick={() => void copy()}>复制</DialogButton>
-        <DialogButton onClick={closeModal}>关闭</DialogButton>
+        <DialogButton preferredFocus style={{ minWidth: 0, flex: 1, padding: 0 }} onClick={back}>返回</DialogButton>
+        <DialogButton style={{ minWidth: 0, flex: 1, padding: 0 }} disabled={busy} onClick={() => void refresh()}>刷新</DialogButton>
+        <DialogButton style={{ minWidth: 0, flex: 1, padding: 0 }} disabled={busy || !text} onClick={() => void copy()}>复制</DialogButton>
       </Focusable>
       {(message || limited) && <div role="status" style={{ fontSize: 12 }}>{limited ? "日志已截断 · " : ""}{message}</div>}
       <Focusable ref={scroll} tabIndex={0} style={{ overflowY: "auto", flex: 1, minHeight: 0 }}
-        onCancel={closeModal}
+        onCancel={event => { event.preventDefault(); event.stopPropagation(); back(); }}
         onGamepadDirection={event => {
           const element = scroll.current;
           const amount = event.detail.button === GamepadButton.DIR_DOWN ? 120 : event.detail.button === GamepadButton.DIR_UP ? -120 : 0;
@@ -57,6 +57,5 @@ export function LogModal({ closeModal }: { closeModal: () => void }) {
         }}>
         <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 13, lineHeight: 1.5, margin: 0 }}>{text}</pre>
       </Focusable>
-    </div>
-  </ModalRoot>;
+  </Focusable>;
 }
