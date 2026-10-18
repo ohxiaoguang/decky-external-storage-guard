@@ -1,18 +1,42 @@
 """Bounded raw current-boot journal text. No grading, attribution or inference."""
 import json
+from datetime import datetime
+import time
 import re
 from .commands import run, require_success, ReadFailure
 
 MAX_RECORDS = 2000
 MAX_TEXT_BYTES = 48 * 1024  # Entire displayed text fits the 64 KiB clipboard cap.
 SLEEP_UNITS = ("systemd-suspend.service", "systemd-hibernate.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service")
-FIELDS = ("MESSAGE", "_BOOT_ID", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "_SOURCE_REALTIME_TIMESTAMP",
-          "_SOURCE_MONOTONIC_TIMESTAMP", "_TRANSPORT", "_SYSTEMD_UNIT", "UNIT", "SYSLOG_IDENTIFIER")
+FIELDS = ("MESSAGE", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP",
+          "_TRANSPORT", "_SYSTEMD_UNIT", "UNIT", "SYSLOG_IDENTIFIER")
 KERNEL_SCOPE = re.compile(r"\bmmc\d*\b|mmcblk|sdhci|usb|\buas\b|\bscsi\b|\bsd[a-z]+\b|\bI/O\b|blk_update_request|Buffer I/O|EXT4|exfat|ntfs|\bPM:|Freezing user space|Restarting tasks|suspend|resume", re.I)
 
 
 def number(value):
-    return int(value) if isinstance(value, (str, int)) and str(value).isdigit() else 0
+    return int(value) if isinstance(value, (str, int)) and not isinstance(value, bool) and len(str(value)) <= 20 and str(value).isdigit() else None
+
+
+def local_timestamp(microseconds):
+    if microseconds is not None:
+        try:
+            seconds, remainder = divmod(microseconds, 1000000)
+            # Exactly one conversion, in the device's local timezone. Avoid float
+            # microsecond rounding; preserve milliseconds to distinguish nearby records.
+            return datetime.fromtimestamp(seconds).replace(microsecond=remainder).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        except (OSError, OverflowError, ValueError):
+            pass
+    return "未知时间"
+
+
+def source(row):
+    identifier = row.get("SYSLOG_IDENTIFIER")
+    if isinstance(identifier, str) and identifier and not any(c in identifier for c in "\r\n"):
+        return identifier
+    if row.get("_TRANSPORT") == "kernel":
+        return "kernel"
+    unit = row.get("_SYSTEMD_UNIT") or row.get("UNIT")
+    return unit.removesuffix(".service") if isinstance(unit, str) and unit else "未知来源"
 
 
 async def read_journal():
@@ -29,6 +53,7 @@ async def read_journal():
         if exc.status == "output_limit":
             return {"status": "output_limit", "message": "日志已截断：读取输出超过上限，无法安全显示不完整 JSON", "text": "", "limited": True}
         raise
+    time.tzset()  # Refresh local timezone after a system timezone change.
     records = []
     count, skipped = 0, False
     for line in text.splitlines():
@@ -53,12 +78,14 @@ async def read_journal():
         else:
             skipped = True
             continue
-        fields = " ".join(f"{key}={row[key]}" for key in FIELDS if key != "MESSAGE" and key in row)
-        records.append((number(row.get("__MONOTONIC_TIMESTAMP")), number(row.get("__REALTIME_TIMESTAMP")), fields + "\n" + raw + "\n"))
-    records.sort(key=lambda row: (row[0], row[1]))
+        stamp = number(row.get("__REALTIME_TIMESTAMP"))
+        monotonic = number(row.get("__MONOTONIC_TIMESTAMP"))
+        records.append(((stamp is None, stamp or 0, monotonic or 0), f"{local_timestamp(stamp)} {source(row)}: {raw}\n"))
+    # Display real-time order; missing times remain unknown and sort last, stably.
+    records.sort(key=lambda record: record[0])
     kept, size = [], 0
     limited = count >= MAX_RECORDS or skipped
-    for _, _, raw in reversed(records):
+    for _, raw in reversed(records):
         amount = len(raw.encode("utf-8"))
         if size + amount > MAX_TEXT_BYTES:
             limited = True

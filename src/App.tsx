@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { callable } from "@decky/api";
-import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
+import { callable, useQuickAccessVisible } from "@decky/api";
+import { ButtonItem, PanelSection, PanelSectionRow, Router } from "@decky/ui";
 import { Action, Device, Operation, OperationResponse, Partition, Snapshot } from "./types";
 import { size } from "./strings";
 import { Updates } from "./components/Updates";
-import { LogPage } from "./components/LogPage";
+import { LOG_ROUTE } from "./components/LogPage";
 
 const getSnapshot = callable<[], Snapshot>("get_snapshot");
 const mountPartition = callable<[token: string], OperationResponse>("mount_partition");
@@ -41,17 +41,17 @@ function DeviceCard({ device, busy, working, armed, operate, unmount, cancel, fo
 }
 
 export function App() {
-  // This component stays mounted when showing logs; device data and operation results stay here.
+  // alwaysRender keeps this home mounted when the full-screen route closes QAM.
   const [devices, setDevices] = useState<Device[]>([]);
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<Working>(null);
   const [message, setMessage] = useState("");
-  const [page, setPage] = useState<"home" | "logs">("home");
+  const visible = useQuickAccessVisible();
+  const homeVisible = useRef(visible);
   const [armed, setArmed] = useState<Confirmation | null>(null);
   const running = useRef(false);
   const alive = useRef(true);
   const currentDevices = useRef<Device[]>([]);
-  const currentPage = useRef<"home" | "logs">("home");
   const confirmation = useRef<Confirmation | null>(null);
   const expiry = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearConfirmation = () => {
@@ -97,7 +97,7 @@ export function App() {
     return token && actual?.actions?.[action]?.token === token && (action === "unmount" ? actual.mounts.length === 1 : actual.mounts.length === 0) ? token : null;
   };
   const operate = async (action: Action, part: Partition) => {
-    if (running.current || !alive.current || currentPage.current !== "home") return;
+    if (running.current || !alive.current || !homeVisible.current) return;
     const token = currentPart(action, part);
     cancel();
     if (!token) { setMessage("设备状态已变化，请刷新后重试"); return; }
@@ -118,7 +118,7 @@ export function App() {
     finally { running.current = false; if (alive.current) { setBusy(false); setWorking(null); } }
   };
   const unmount = (part: Partition, confirmed: boolean) => {
-    if (running.current || !alive.current || currentPage.current !== "home") return;
+    if (running.current || !alive.current || !homeVisible.current) return;
     const token = currentPart("unmount", part);
     const pending = confirmation.current;
     if (confirmed) {
@@ -132,17 +132,20 @@ export function App() {
     confirmation.current = next; setArmed(next);
     expiry.current = setTimeout(cancel, 15000);
   };
-  const navigate = (next: "home" | "logs") => {
-    if (!alive.current) return;
-    cancel(); currentPage.current = next; setPage(next);
+  const openLogs = () => {
+    if (running.current || !alive.current) return;
+    cancel();
+    homeVisible.current = false; // Block queued home callbacks before QAM visibility updates.
+    try { Router.CloseSideMenus(); Router.Navigate(LOG_ROUTE); }
+    catch (error) { homeVisible.current = visible; setMessage(`日志页面打开失败：${error instanceof Error ? error.message : "导航不可用"}`); }
   };
+  useEffect(() => { homeVisible.current = visible; if (!visible) cancel(); }, [visible]);
   useEffect(() => {
     alive.current = true;
     const stop = () => { alive.current = false; clearConfirmation(); };
     cleanups.add(stop); void refresh();
     return () => { stop(); cleanups.delete(stop); };
   }, []);
-  if (page === "logs") return <LogPage back={() => navigate("home")} />;
   return <>
     <PanelSection><PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => void refresh()}>{busy ? "处理中…" : "刷新"}</ButtonItem></PanelSectionRow>
       {message && <PanelSectionRow><p role="status" style={{ fontSize: 13, overflowWrap: "anywhere" }}>{message}</p></PanelSectionRow>}
@@ -152,7 +155,7 @@ export function App() {
       focus={path => { if (confirmation.current && confirmation.current.path !== path) cancel(); }} />)}
     {!devices.length && !busy && <PanelSection><PanelSectionRow><p>暂无可确认的外部存储</p></PanelSectionRow></PanelSection>}
     <PanelSection>
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => navigate("logs")}>查看日志</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={openLogs}>查看日志</ButtonItem></PanelSectionRow>
       <Updates busy={busy} />
     </PanelSection>
   </>;

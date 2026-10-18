@@ -19,8 +19,16 @@ const hooks = {
 globalThis.SP_REACT = hooks;
 const jsx = (type, props, key) => ({ type, props, key });
 globalThis.SP_JSX = { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
-// A modal call/import must not be needed for either operation.
-globalThis.DFL = { staticClasses: { Title: "title" }, PanelSection: "PanelSection", PanelSectionRow: "PanelSectionRow", ButtonItem: "ButtonItem", DialogButton: "DialogButton", Focusable: "Focusable", GamepadButton: { DIR_UP: 9, DIR_DOWN: 10 } };
+// No modal APIs: real routes are registered independently of the sidebar content.
+const LOG_ROUTE = "/external-storage-guard/logs";
+const routes = new Map(), navigation = [], history = ["/library/home"];
+let quickVisible = true, currentPath = history[0];
+const navigate = path => { currentPath = path; history.push(path); navigation.push(["navigate", path]); };
+const goBack = () => { if (history.length > 1) history.pop(); currentPath = history.at(-1); navigation.push(["back", currentPath]); };
+globalThis.DFL = { staticClasses: { Title: "title" }, PanelSection: "PanelSection", PanelSectionRow: "PanelSectionRow", ButtonItem: "ButtonItem", DialogButton: "DialogButton", Focusable: "Focusable", GamepadButton: { DIR_UP: 9, DIR_DOWN: 10 },
+  Router: { CloseSideMenus() { quickVisible = false; navigation.push(["close"]); }, Navigate: navigate },
+  Navigation: { NavigateBack: goBack }, ReactRouter: { useLocation: () => ({ pathname: currentPath }) },
+};
 const realTimeout = globalThis.setTimeout, realClearTimeout = globalThis.clearTimeout;
 const confirmationTimers = new Set();
 globalThis.setTimeout = (callback, ms, ...args) => {
@@ -35,9 +43,13 @@ const device = { id: "/dev/mmcblk0", model: "MicroSD fixture", kind: "SD", size:
 let snapshot = { devices: [device], deviceStatus: { status: "ok", message: "" }, lastOperation: null };
 const calls = [], copied = [];
 let completeOperation, failSnapshot = false, clipboardOK = true, focusRestored = false;
-let logResponse = { status: "ok", message: "日志已截断", limited: true, text: '__REALTIME_TIMESTAMP=123 _SYSTEMD_UNIT=udisks2.service\nraw 中文\n"); globalThis.compromised = true; //\nTuning failed' };
+let logResponse = { status: "ok", message: "日志已截断", limited: true, text: '2026-10-19 00:37:09.557 udisksd: raw 中文\n"); globalThis.compromised = true; //\nTuning failed' };
 globalThis.window = { __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: {
-  connect: version => ({ _version: version, callable: method => async (...args) => {
+  connect: version => ({ _version: version,
+    useQuickAccessVisible: () => quickVisible,
+    routerHook: { addRoute(path, component, props) { assert.equal(props.exact, true); assert.ok(!routes.has(path)); routes.set(path, component); navigation.push(["register", path]); },
+      removeRoute(path) { routes.delete(path); navigation.push(["remove", path]); } },
+    callable: method => async (...args) => {
     calls.push({ method, args });
     if (method === "get_snapshot") { if (failSnapshot) throw new Error("offline"); return snapshot; }
     if (method === "get_logs") return logResponse;
@@ -63,6 +75,8 @@ const button = (tree, label) => find(tree, node => ["ButtonItem", "DialogButton"
 const text = tree => Array.isArray(tree) ? tree.map(text).join(" ") : tree && typeof tree === "object" ? text(tree.props?.children) : String(tree ?? "");
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const plugin = (await import(pathToFileURL(process.argv[2]).href)).default();
+assert.equal(plugin.alwaysRender, true, "official flag keeps sidebar content mounted when closed");
+assert.equal(routes.get(LOG_ROUTE)?.name, "LogPage");
 const app = new Host(); app.render(plugin.content.type, {}); await flush();
 const render = () => app.render(plugin.content.type, {});
 let tree = render();
@@ -100,13 +114,20 @@ cardTree = arm();
 const beforeLogs = card.props.device;
 const leftPageConfirm = button(cardTree, "确认卸载").props.onClick;
 button(tree, "查看日志").props.onClick();
-let logElement = named(render(), "LogPage");
-assert.ok(logElement); assert.equal(named(render(), "DeviceCard"), undefined);
+assert.deepEqual(navigation.slice(-2), [["close"], ["navigate", LOG_ROUTE]]);
+assert.ok(named(render(), "DeviceCard"), "home stays mounted behind closed sidebar");
+assert.equal(named(render(), "LogPage"), undefined, "logs are not rendered inside sidebar");
 leftPageConfirm(); assert.equal(operationCount(), 0, "hidden home callbacks cannot operate");
-logElement.props.back(); cardTree = renderCard();
+const firstLogHost = new Host(); firstLogHost.render(routes.get(LOG_ROUTE), {}); await flush();
+button(firstLogHost.render(routes.get(LOG_ROUTE), {}), "返回").props.onClick();
+firstLogHost.unmount(); quickVisible = true; cardTree = renderCard();
+assert.equal(currentPath, "/library/home");
 assert.strictEqual(card.props.device, beforeLogs);
 assert.ok(button(cardTree, "卸载"), "leaving home cancels confirmation");
 assert.equal(calls.filter(c => c.method === "get_snapshot").length, 1, "back does not initialize App again");
+// Closing QAM by itself also invalidates a pending unmount confirmation.
+cardTree = arm(); quickVisible = false; render(); quickVisible = true;
+assert.ok(button(renderCard(), "卸载")); assert.equal(operationCount(), 0);
 cardTree = arm();
 const beforeScanConfirm = button(cardTree, "确认卸载").props.onClick;
 button(tree, "刷新").props.onClick(); await flush(); beforeScanConfirm();
@@ -149,6 +170,10 @@ assert.match(text(tree), /卸载成功/); assert.match(text(cardTree), /未挂�
 assert.equal(button(cardTree, "卸载").props.disabled, true);
 assert.equal(button(cardTree, "挂载").props.disabled, false);
 assert.equal(calls.filter(c => c.method === "get_snapshot").length, 4, "no whole-page reload after operation");
+const queuedMount = button(cardTree, "挂载").props.onClick;
+button(tree, "查看日志").props.onClick(); queuedMount();
+assert.equal(calls.filter(c => c.method === "mount_partition").length, 0, "queued hidden-home mount cannot execute during navigation");
+render(); goBack(); quickVisible = true; cardTree = renderCard();
 button(cardTree, "挂载").props.onClick(); button(cardTree, "挂载").props.onClick();
 assert.deepEqual(calls.filter(c => c.method === "mount_partition").map(c => c.args), [["mount-token"]]);
 assert.equal(button(renderCard(), "挂载中…").props.disabled, true);
@@ -175,12 +200,15 @@ assert.match(text(multiple), /mmcblk0p1/); assert.match(text(multiple), /mmcblk0
 const beforeLogDevice = named(tree, "DeviceCard").props.device;
 const readsBeforeLogs = calls.filter(c => c.method === "get_snapshot").length;
 button(tree, "查看日志").props.onClick();
-logElement = named(render(), "LogPage");
-assert.ok(logElement);
-const logHost = new Host(); logHost.render(logElement.type, logElement.props); await flush();
-const renderLog = () => logHost.render(logElement.type, logElement.props);
+assert.equal(currentPath, LOG_ROUTE); render();
+const logComponent = routes.get(LOG_ROUTE);
+const logHost = new Host(); logHost.render(logComponent, {}); await flush();
+const renderLog = () => logHost.render(logComponent, {});
 let logTree = renderLog();
 assert.equal(logTree.type, "Focusable");
+assert.match(text(logTree), /External Storage Guard · 系统日志/);
+assert.equal(logTree.props.style.position, "absolute");
+assert.equal(logTree.props.style.inset, 0);
 assert.ok(button(logTree, "返回").props.preferredFocus);
 assert.equal(find(logTree, node => node.type === "DialogButton").length, 3);
 assert.match(text(logTree), /Tuning failed/); assert.match(text(logTree), /日志已截断/);
@@ -192,7 +220,11 @@ const originalLog = logResponse.text;
 logResponse = { status: "permission_denied", message: "无权限", text: "", limited: false };
 button(logTree, "刷新").props.onClick(); button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
 assert.match(text(logTree), /无权限/); assert.ok(text(logTree).includes(originalLog), "failed log read preserves displayed raw text");
-logResponse = { status: "ok", message: "", text: "EXT4-fs: actual raw mount message", limited: false };
+logResponse = { status: "no_logs", message: "本次启动暂无可读取的相关日志", text: "", limited: false };
+button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
+assert.match(text(logTree), /本次启动暂无可读取的相关日志/);
+assert.equal(button(logTree, "复制").props.disabled, true);
+logResponse = { status: "ok", message: "", text: "2026-10-19 00:37:09.557 kernel: EXT4-fs: actual raw mount message", limited: false };
 button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
 assert.doesNotMatch(text(logTree), /Tuning failed/); assert.match(text(logTree), /actual raw mount/);
 const scroll = find(logTree, node => node.type === "Focusable" && node.props.tabIndex === 0)[0];
@@ -201,16 +233,20 @@ scroll.props.ref.current = { scrollTop: 0, clientHeight: 100, scrollHeight: 800,
 scroll.props.onGamepadDirection({ detail: { button: 10 }, preventDefault() {}, stopPropagation() {} }); assert.equal(scrolled, 120);
 scroll.props.onKeyDown({ key: "PageDown", preventDefault() {} }); assert.equal(scrolled, 440);
 button(logTree, "复制").props.onClick(); await flush(); assert.equal(copied.at(-1), logResponse.text);
-button(logTree, "返回").props.onClick(); logHost.unmount(); tree = render();
+const backCount = navigation.filter(n => n[0] === "back").length;
+button(logTree, "返回").props.onClick(); button(logTree, "返回").props.onClick();
+assert.equal(navigation.filter(n => n[0] === "back").length, backCount + 1, "duplicate Back cannot leave an additional Steam page");
+assert.equal(currentPath, "/library/home");
+logHost.unmount(); quickVisible = true; tree = render();
 assert.strictEqual(named(tree, "DeviceCard").props.device, beforeLogDevice, "return preserves actual device state");
 assert.equal(calls.filter(c => c.method === "get_snapshot").length, readsBeforeLogs, "no device initialization from log refresh or return");
 assert.match(text(tree), /保留当前页面/, "home feedback survives log navigation");
 // B/back uses native cancellation handling without bubbling into closing the plugin.
-button(tree, "查看日志").props.onClick(); logElement = named(render(), "LogPage");
-const backHost = new Host(); backHost.render(logElement.type, logElement.props); await flush();
+button(tree, "查看日志").props.onClick(); render();
+const backHost = new Host(); backHost.render(logComponent, {}); await flush();
 let prevented = false, stopped = false;
-backHost.render(logElement.type, logElement.props).props.onCancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
-backHost.unmount(); tree = render(); assert.ok(named(tree, "DeviceCard")); assert.ok(prevented && stopped);
+backHost.render(logComponent, {}).props.onCancel({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+backHost.unmount(); quickVisible = true; tree = render(); assert.ok(named(tree, "DeviceCard")); assert.ok(prevented && stopped);
 const updateElement = named(tree, "Updates"); const updateHost = new Host();
 let updateTree = updateHost.render(updateElement.type, updateElement.props);
 button(updateTree, "复制更新链接").props.onClick(); await flush();
@@ -218,7 +254,13 @@ assert.equal(copied.at(-1), "https://github.com/ohxiaoguang/decky-external-stora
 assert.doesNotMatch(text(updateTree), /https:\/\//);
 cardTree = arm(); const afterDismount = button(cardTree, "确认卸载").props.onClick;
 const operationsBeforeDismount = operationCount();
-plugin.onDismount(); afterDismount(); app.unmount(); updateHost.unmount();
+// Unloading while on the full-screen route exits it and unregisters exactly once.
+button(tree, "查看日志").props.onClick(); render();
+const unloadingLogHost = new Host(); unloadingLogHost.render(logComponent, {}); await flush();
+plugin.onDismount(); afterDismount(); app.unmount(); updateHost.unmount(); unloadingLogHost.unmount();
+assert.equal(currentPath, "/library/home"); assert.equal(routes.size, 0);
+assert.deepEqual(navigation.slice(-2), [["back", "/library/home"], ["remove", LOG_ROUTE]]);
+assert.equal(navigation.filter(n => n[0] === "register").length, 1, "all page operations reused one plugin initialization");
 assert.equal(operationCount(), operationsBeforeDismount); assert.equal(confirmationTimers.size, 0);
 globalThis.setTimeout = realTimeout; globalThis.clearTimeout = realClearTimeout;
-console.log("Inline unmount first/second click / cancel / expiry / state changes, verified results, stable App and logs page / back / refresh / exact copy / gamepad scroll: OK");
+console.log("Inline unmount first/second click / cancel / expiry / state changes, verified results, stable App, true fullscreen route / QAM close / back / unregister / refresh / exact copy / gamepad scroll: OK");
