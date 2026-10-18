@@ -1,6 +1,6 @@
 {
   "name": "external-storage-guard",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Minimal Decky external storage mount/unmount and raw system journal",
   "type": "module",
   "license": "BSD-3-Clause",
