@@ -1,166 +1,113 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { callable } from "@decky/api";
-import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow } from "@decky/ui";
-import { Snapshot, Window, Severity, RemountResponse, Operation } from "./types";
-import { zh, time } from "./strings";
-import { Status } from "./components/Status";
-import { DeviceList } from "./components/DeviceList";
-import { DeviceDetail } from "./components/DeviceDetail";
-import { EventList } from "./components/EventList";
-import { OperationStatus } from "./components/OperationStatus";
-import { SleepHistory } from "./components/SleepHistory";
-import { RemountControls } from "./components/RemountControls";
+import { ButtonItem, ConfirmModal, PanelSection, PanelSectionRow, showModal, ShowModalResult } from "@decky/ui";
+import { Action, Device, Operation, OperationResponse, Partition, Snapshot } from "./types";
+import { size } from "./strings";
 import { Updates } from "./components/Updates";
-import { ReportControls } from "./components/ReportControls";
+import { LogModal } from "./components/LogModal";
 
-const getSnapshot = callable<[window: Window], Snapshot>("get_snapshot");
-const remountPartition = callable<[token: string], RemountResponse>("remount_partition");
+const getSnapshot = callable<[], Snapshot>("get_snapshot");
+const mountPartition = callable<[token: string], OperationResponse>("mount_partition");
+const unmountPartition = callable<[token: string], OperationResponse>("unmount_partition");
 const cleanups = new Set<() => void>();
 export function disposeViews() { cleanups.forEach(fn => fn()); cleanups.clear(); }
 
+function DeviceCard({ device, busy, operate, confirm }: {
+  device: Device; busy: boolean; operate: (action: Action, token: string) => void; confirm: (part: Partition) => void;
+}) {
+  const parts = device.partitions.filter(part => part.path !== device.id);
+  return <PanelSection title={`${device.model || (device.kind === "SD" ? "MicroSD" : device.kind)} · ${size(device.size)}`}>
+    {!parts.length && <PanelSectionRow><p>{device.mounted ? "已挂载" : "未挂载"} · {device.readOnly ? "只读" : "—"} · 无可操作分区</p></PanelSectionRow>}
+    {parts.map(part => <PanelSectionRow key={part.path}><div style={{ fontSize: 13, lineHeight: 1.6 }}>
+      <div>{part.name} · {part.filesystem || "未知文件系统"} · {size(part.size)}</div>
+      <div>{part.mounts.length ? "已挂载" : "未挂载"} · {part.readOnly || part.mounts.some(m => m.readOnly) ? "只读" : part.mounts.length ? "可读写" : "读写状态待挂载确认"}</div>
+      <ButtonItem layout="below" disabled={busy || part.mounts.length !== 1 || !part.actions?.unmount?.token} onClick={() => confirm(part)}>卸载</ButtonItem>
+      <ButtonItem layout="below" disabled={busy || part.mounts.length > 0 || !part.actions?.mount?.token}
+        onClick={() => { const token = part.actions?.mount?.token; if (token && part.mounts.length === 0) operate("mount", token); }}>挂载</ButtonItem>
+      {!part.actions?.mount?.token && !part.actions?.unmount?.token && <div style={{ fontSize: 12 }}>{(part.mounts.length ? part.actions?.unmount?.reason : part.actions?.mount?.reason) || "该分区不可操作"}</div>}
+    </div></PanelSectionRow>)}
+  </PanelSection>;
+}
+
 export function App() {
-  const [page, setPage] = useState<"home" | "details">("home");
-  const [section, setSection] = useState("device");
-  const [window, setWindow] = useState<Window>("boot");
-  const [data, setData] = useState<Snapshot | null>(null);
+  const [devices, setDevices] = useState<Device[]>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [managing, setManaging] = useState(false);
-  const [operation, setOperation] = useState<Operation | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [deviceFilter, setDeviceFilter] = useState("all");
-  const [level, setLevel] = useState<Severity | "all">("all");
-  const [sleepCycle, setSleepCycle] = useState<string | null>(null);
-  const [wakeMinutes, setWakeMinutes] = useState(5);
-  const generation = useRef(0);
-  const active = useRef(false);
-  const loading = useRef(false);
-  const windowRef = useRef<Window>("boot");
-  const refresh = useCallback(async (requestedWindow = windowRef.current) => {
-    if (loading.current || !active.current) return;
-    loading.current = true;
-    const request = ++generation.current;
-    setBusy(true); setError("");
-    try {
-      const result = await getSnapshot(requestedWindow);
-      if (active.current && generation.current === request) { setData(result); setOperation(result.lastOperation); setSleepCycle(null); }
-    } catch {
-      if (active.current && generation.current === request) { setError(zh.requestError); setData(null); }
-    } finally {
-      if (active.current && generation.current === request) { setBusy(false); loading.current = false; }
+  const [message, setMessage] = useState("");
+  const running = useRef(false);
+  const alive = useRef(true);
+  const confirmation = useRef<ShowModalResult | null>(null);
+  const logs = useRef<ShowModalResult | null>(null);
+  const apply = (snapshot: Snapshot | null) => {
+    if (!snapshot || snapshot.deviceStatus.status !== "ok") return false;
+    setDevices(snapshot.devices); // Stable device/partition keys preserve the page.
+    return true;
+  };
+  const describe = (operation: Operation) => {
+    const name = operation.action === "unmount" ? "卸载" : "挂载";
+    const target = operation.target?.split("/").pop() || "";
+    if (operation.status === "success" && operation.verified) {
+      const mounts = operation.mounts?.map(m => m.target).join(", ");
+      return `${name}成功 ${target}${operation.action === "mount" ? ` · ${mounts || ""} · ${operation.readOnly ? "只读" : "可读写"}` : ""}`;
     }
-  }, []);
-  const remount = async (token: string) => {
-    if (loading.current || !active.current) return;
-    loading.current = true;
-    const request = ++generation.current;
-    setBusy(true); setManaging(true); setError("");
+    return `${operation.status === "uncertain" || operation.status === "success" ? "不确定" : "失败"}：${operation.message}`;
+  };
+  const refresh = async () => {
+    if (running.current || !alive.current) return;
+    running.current = true; setBusy(true);
     try {
-      const result = await remountPartition(token);
-      if (active.current && generation.current === request) {
-        setOperation(result.operation);
-        if (result.snapshot) {
-          windowRef.current = "boot"; setWindow("boot"); setData(result.snapshot);
-          setSleepCycle(null);
-        }
-      }
-    } catch {
-      if (active.current && generation.current === request) {
-        setOperation(null); setData(null); setError(zh.communicationUnknown);
-      }
-    } finally {
-      if (active.current && generation.current === request) { setBusy(false); setManaging(false); loading.current = false; }
-    }
+      const snapshot = await getSnapshot();
+      if (!alive.current) return;
+      if (!apply(snapshot)) setMessage(snapshot.deviceStatus.message);
+      else if (snapshot.lastOperation) setMessage(describe(snapshot.lastOperation));
+      else setMessage("");
+    } catch { if (alive.current) setMessage("设备读取失败；保留当前页面"); }
+    finally { running.current = false; if (alive.current) setBusy(false); }
+  };
+  const operate = async (action: Action, token: string) => {
+    if (running.current || !alive.current) return;
+    running.current = true; setBusy(true); setMessage("操作中…");
+    try {
+      const result = await (action === "mount" ? mountPartition(token) : unmountPartition(token));
+      if (!alive.current) return;
+      apply(result.snapshot);
+      setMessage(describe(result.operation));
+    } catch { if (alive.current) setMessage("不确定：通信中断，请等待后刷新核对；当前页面已保留"); }
+    finally { running.current = false; if (alive.current) setBusy(false); }
+  };
+  const confirm = (part: Partition) => {
+    if (running.current || confirmation.current || part.mounts.length !== 1 || !part.actions?.unmount?.token) return;
+    let settled = false;
+    const finish = () => { confirmation.current?.Close(); confirmation.current = null; };
+    const dismiss = () => { settled = true; finish(); };
+    confirmation.current = showModal(<ConfirmModal strTitle={`卸载 ${part.name}`} bDestructiveWarning
+      strDescription="请先关闭使用该分区的游戏和程序。卸载后不会自动挂载，也不代表 USB 设备已经断电。"
+      strOKButtonText="卸载" strCancelButtonText="取消" onCancel={dismiss} closeModal={dismiss}
+      onOK={() => { if (settled || !alive.current) return; settled = true; finish(); void operate("unmount", part.actions.unmount.token!); }} />);
+    const opened = confirmation.current;
+    void opened.ClosedPromise.then(() => { settled = true; if (confirmation.current === opened) confirmation.current = null; });
+  };
+  const openLogs = () => {
+    if (logs.current) return;
+    const closeModal = () => { logs.current?.Close(); logs.current = null; };
+    logs.current = showModal(<LogModal closeModal={closeModal} />, undefined, { bNeverPopOut: true });
+    const opened = logs.current;
+    void opened.ClosedPromise.then(() => { if (logs.current === opened) logs.current = null; });
   };
   useEffect(() => {
-    active.current = true; loading.current = false;
-    const cancel = () => { active.current = false; generation.current++; };
-    cleanups.add(cancel);
-    setData(null);
-    void refresh();
-    return () => { cancel(); cleanups.delete(cancel); };
-  }, [refresh]);
-  const filtered = useMemo(() => (data?.events || []).filter(e =>
-    (deviceFilter === "all" || (deviceFilter === "unassociated" ? !e.deviceId : e.deviceId === deviceFilter)) &&
-    (level === "all" || e.severity === level) &&
-    (!sleepCycle || (e.wakeContext?.cycleId === sleepCycle && e.wakeContext.phase === "after_wake" &&
-      e.wakeContext.delaySeconds !== null && e.wakeContext.delaySeconds <= wakeMinutes * 60))
-  ), [data, selected, deviceFilter, level, sleepCycle, wakeMinutes]);
-  const device = data?.devices.find(d => d.id === selected);
-  const onReportBusy = (value: boolean) => { if (active.current) { loading.current = value; setBusy(value); } };
-  const details = (tab = "device") => { setSection(tab); setPage("details"); };
-  const home = () => {
-    setPage("home"); setSleepCycle(null);
-    if (windowRef.current !== "boot") { windowRef.current = "boot"; setWindow("boot"); setData(null); void refresh("boot"); }
-  };
-  const recent = (data?.events || []).filter(e => e.severity !== "Info").slice(0, 5);
-  const cycle = data?.sleepHistory?.cycles[0];
+    alive.current = true;
+    const stop = () => { alive.current = false; confirmation.current?.Close(); logs.current?.Close(); };
+    cleanups.add(stop); void refresh();
+    return () => { stop(); cleanups.delete(stop); };
+  }, []);
   return <>
-    <PanelSection>
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => void refresh()}>{busy ? "读取中…" : zh.refresh}</ButtonItem></PanelSectionRow>
-      {error && <PanelSectionRow><p role="status" style={{ fontSize: 12, color: "#ffce70" }}>{error}</p></PanelSectionRow>}
+    <PanelSection><PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => void refresh()}>{busy ? "处理中…" : "刷新"}</ButtonItem></PanelSectionRow>
+      {message && <PanelSectionRow><p role="status" style={{ fontSize: 13, overflowWrap: "anywhere" }}>{message}</p></PanelSectionRow>}
     </PanelSection>
-    {page === "home" ? <>
-      {data && <>
-        {data.deviceStatus.status !== "ok" && <PanelSection><PanelSectionRow><p>设备读取失败，请查看详情</p></PanelSectionRow></PanelSection>}
-        {data.journalStatus.status !== "ok" && <PanelSection><PanelSectionRow><p style={{ fontSize: 12 }}>日志不可用，无法判断有无异常</p></PanelSectionRow></PanelSection>}
-        {data.journalStatus.limited && <PanelSection><PanelSectionRow><p style={{ fontSize: 12 }}>日志不完整，计数仅覆盖已返回记录</p></PanelSectionRow></PanelSection>}
-        <DeviceList devices={data.devices} selected={selected} busy={busy} readable={data.journalStatus.status === "ok"}
-          onSelect={id => { setSelected(selected === id ? null : id); setDeviceFilter(id); }} />
-        {device && <>
-          <PanelSection title="设备操作">
-            {device.partitions.filter(p => p.path !== device.id).map((p, i, parts) => <RemountControls
-              key={p.path} partition={p} busy={busy} compact label={parts.length > 1 ? `重新挂载 · 分区 ${i + 1}` : "重新挂载"} onRemount={token => void remount(token)} />)}
-          </PanelSection>
-          <ReportControls revision={operation?.finishedAt ?? data?.refreshedAt} compact busy={busy} onBusy={onReportBusy} />
-        </>}
-        {selected && !device && <PanelSection><PanelSectionRow><p>所选设备已断开或不可用</p></PanelSectionRow></PanelSection>}
-      </>}
-      <OperationStatus operation={operation} busy={managing} />
-      {data && <>
-        <PanelSection title="最近存储异常">
-          <PanelSectionRow><p style={{ fontSize: 13 }}>{data.journalStatus.status === "ok" ?
-            `本次开机记录：错误 ${data.events.filter(e => e.severity === "Error").length} · 警告 ${data.events.filter(e => e.severity === "Warning").length}` : "异常数量未知"}</p></PanelSectionRow>
-          {recent.map(event => <PanelSectionRow key={event.id}><ButtonItem layout="below" disabled={busy}
-            description={time(event.timestamp)} onClick={() => details("logs")}>{event.summary}</ButtonItem></PanelSectionRow>)}
-          {!recent.length && <PanelSectionRow><p style={{ fontSize: 12 }}>{data.journalStatus.status === "ok" ? "已读取日志中暂无异常；不代表设备健康" : "暂无可用记录"}</p></PanelSectionRow>}
-        </PanelSection>
-        <PanelSection title="最近休眠 / 唤醒"><PanelSectionRow><div style={{ fontSize: 12 }}>
-          {cycle ? <>休眠 {time(cycle.start?.timestamp ?? null)}<br />唤醒 {time(cycle.wake?.timestamp ?? null)}（日志估计）</> : "暂无可配对记录"}
-        </div></PanelSectionRow></PanelSection>
-      </>}
-      <PanelSection><PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => details(device ? "device" : "logs")}>查看详情</ButtonItem></PanelSectionRow></PanelSection>
+    {devices.map(device => <DeviceCard key={device.id} device={device} busy={busy} operate={(action, token) => void operate(action, token)} confirm={confirm} />)}
+    {!devices.length && !busy && <PanelSection><PanelSectionRow><p>暂无可确认的外部存储</p></PanelSectionRow></PanelSection>}
+    <PanelSection>
+      <PanelSectionRow><ButtonItem layout="below" onClick={openLogs}>查看日志</ButtonItem></PanelSectionRow>
       <Updates busy={busy} />
-    </> : <>
-      <PanelSection>
-        <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={home}>返回主页</ButtonItem></PanelSectionRow>
-        <PanelSectionRow><DropdownItem label="诊断详情" selectedOption={section} disabled={busy}
-          rgOptions={[{ data: "device", label: "设备信息" }, { data: "logs", label: "内核异常日志" }, { data: "sleep", label: "休眠历史" }, { data: "reports", label: "诊断报告 / TXT" }]}
-          onChange={option => setSection(option.data)} /></PanelSectionRow>
-      </PanelSection>
-      {section === "reports" && <ReportControls revision={operation?.finishedAt ?? data?.refreshedAt} busy={busy} onBusy={onReportBusy} />}
-      {section === "device" && <>
-        {device ? <DeviceDetail device={device} readable={data?.journalStatus.status === "ok"} busy={busy} onRemount={token => void remount(token)} /> : <PanelSection><PanelSectionRow><p>请在主页选择设备</p></PanelSectionRow></PanelSection>}
-        <OperationStatus operation={operation} busy={managing} />
-      </>}
-      {(section === "logs" || section === "sleep") && <>
-        <PanelSection><PanelSectionRow><DropdownItem label={zh.journal} selectedOption={window} disabled={busy}
-          rgOptions={Object.entries(zh.windows).map(([data, label]) => ({ data, label }))}
-          onChange={option => { const next = option.data as Window; windowRef.current = next; setWindow(next); setData(null); void refresh(next); }} /></PanelSectionRow></PanelSection>
-        {data && <>
-          <Status data={data} />
-          {section === "sleep" && data.sleepHistory && <SleepHistory events={data.events} history={data.sleepHistory} selected={sleepCycle} onSelect={setSleepCycle} minutes={wakeMinutes} onMinutes={setWakeMinutes} />}
-          <PanelSection title={zh.filter}>
-            <PanelSectionRow><DropdownItem label={zh.overview} selectedOption={deviceFilter}
-              rgOptions={[{ data: "all", label: zh.allDevices }, { data: "unassociated", label: zh.unassociated }, ...data.devices.map(d => ({ data: d.id, label: d.model || d.name }))]}
-              onChange={option => setDeviceFilter(option.data)} /></PanelSectionRow>
-            <PanelSectionRow><DropdownItem label={zh.logs} selectedOption={level}
-              rgOptions={[{ data: "all", label: zh.allLevels }, ...Object.entries(zh.levels).map(([data, label]) => ({ data, label }))]}
-              onChange={option => setLevel(option.data as Severity | "all")} /></PanelSectionRow>
-          </PanelSection>
-          <EventList events={filtered} />
-        </>}
-      </>}
-    </>}
+    </PanelSection>
   </>;
 }

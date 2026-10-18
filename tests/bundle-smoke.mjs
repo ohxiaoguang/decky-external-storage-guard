@@ -26,6 +26,6 @@ assert.equal(typeof definePlugin, "function");
 const plugin = definePlugin();
 assert.equal(plugin.name, "External Storage Guard");
 assert.ok(plugin.content && plugin.icon && plugin.titleView);
-assert.deepEqual(requests.sort(), ["get_snapshot", "remount_partition", "get_report", "export_report"].sort());
+assert.deepEqual(requests.sort(), ["get_snapshot", "mount_partition", "unmount_partition", "get_logs"].sort());
 plugin.onDismount();
 console.log("Packaged frontend ESM entrypoint with test stubs: OK");

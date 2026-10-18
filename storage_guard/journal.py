@@ -1,59 +1,70 @@
-"""Read a bounded tail from explicit journal windows; report failures truthfully."""
+"""Bounded raw current-boot journal text. No grading, attribution or inference."""
 import json
+import re
 from .commands import run, require_success, ReadFailure
 
-MAX_RECORDS = 6000
-MAX_EVENTS = 500
-WINDOWS = {"boot": ["--boot=0"], "day": ["--since=-24h"], "week": ["--since=-7d"], "all": [], "previous": ["--boot=-1"]}
+MAX_RECORDS = 2000
+MAX_TEXT_BYTES = 48 * 1024  # Entire displayed text fits the 64 KiB clipboard cap.
 SLEEP_UNITS = ("systemd-suspend.service", "systemd-hibernate.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service")
-FIELDS = ("MESSAGE", "_BOOT_ID", "__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP",
-          "_SOURCE_REALTIME_TIMESTAMP", "_SOURCE_MONOTONIC_TIMESTAMP", "_TRANSPORT", "_SYSTEMD_UNIT", "UNIT", "SYSLOG_IDENTIFIER", "MESSAGE_ID")
+FIELDS = ("MESSAGE", "_BOOT_ID", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "_SOURCE_REALTIME_TIMESTAMP",
+          "_SOURCE_MONOTONIC_TIMESTAMP", "_TRANSPORT", "_SYSTEMD_UNIT", "UNIT", "SYSLOG_IDENTIFIER")
+KERNEL_SCOPE = re.compile(r"\bmmc\d*\b|mmcblk|sdhci|usb|\buas\b|\bscsi\b|\bsd[a-z]+\b|\bI/O\b|blk_update_request|Buffer I/O|EXT4|exfat|ntfs|\bPM:|Freezing user space|Restarting tasks|suspend|resume", re.I)
 
 
-async def read_journal(window: str) -> dict:
-    if window not in WINDOWS:
-        raise ReadFailure("invalid_request", "不支持的日志时间范围")
-    # -k implies the current boot. Use its explicit transport filter so the 24h
-    # window can span boots without silently dropping retained kernel history.
+def number(value):
+    return int(value) if isinstance(value, (str, int)) and str(value).isdigit() else 0
+
+
+async def read_journal():
     matches = ["_TRANSPORT=kernel"]
-    for unit in SLEEP_UNITS:
+    for unit in (*SLEEP_UNITS, "udisks2.service"):
         matches.extend(["+", f"_SYSTEMD_UNIT={unit}", "+", f"UNIT={unit}"])
-    matches.extend(["+", "SYSLOG_IDENTIFIER=systemd-sleep"])
-    count = 12000 if window in ("week", "all") else MAX_RECORDS
-    output = await run(["journalctl", *matches, "--no-pager", "--output=json", "--all",
-                        "--output-fields=" + ",".join(FIELDS), f"--lines={count}", *WINDOWS[window]], timeout=12)
-    # A permissions hint must take precedence even when journalctl also reports
-    # that an inaccessible boot cannot be found.
-    if any(s in output.stderr.lower() for s in ("permission denied", "not seeing messages", "insufficient permissions", "access denied")):
-        require_success(output, "journalctl")
-    # No matching boot is different from a corrupt/unreadable journal.
-    if window == "previous" and any(s in output.stderr.lower() for s in (
-        "no such boot", "no journal boot entry", "no persistent journal", "no boot found",
-        "cannot assign requested address", "failed to look up boot"
-    )):
-        return {"status": "no_history", "message": "系统未保留上一次启动的内核日志", "records": [], "limited": False}
-    text = require_success(output, "journalctl")
+    for identifier in ("systemd-sleep", "udisksd"):
+        matches.extend(["+", f"SYSLOG_IDENTIFIER={identifier}"])
+    try:
+        output = await run(["journalctl", *matches, "--boot=0", "--no-pager", "--output=json", "--all",
+                            "--output-fields=" + ",".join(FIELDS), f"--lines={MAX_RECORDS}"], timeout=10, limit=4 * 1024 * 1024)
+        text = require_success(output, "journalctl")
+    except ReadFailure as exc:
+        if exc.status == "output_limit":
+            return {"status": "output_limit", "message": "日志已截断：读取输出超过上限，无法安全显示不完整 JSON", "text": "", "limited": True}
+        raise
     records = []
-    shortened = False
+    count, skipped = 0, False
     for line in text.splitlines():
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
-            if not isinstance(record, dict) or not isinstance(record.get("MESSAGE"), str):
-                shortened = True
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("not a journal object")
+        except ValueError as exc:
+            raise ReadFailure("read_failed", "journal JSON 无法解析") from exc
+        count += 1
+        message = row.get("MESSAGE")
+        is_kernel = row.get("_TRANSPORT") == "kernel"
+        if isinstance(message, str):
+            if is_kernel and not KERNEL_SCOPE.search(message):
                 continue
-            clipped = len(record["MESSAGE"]) > 4096
-            shortened |= clipped
-            record = {key: record[key] for key in FIELDS if key in record}
-            record["MESSAGE"] = record["MESSAGE"][:4096]
-            if clipped:
-                record["messageTruncated"] = True
-            records.append(record)
-        except (ValueError, TypeError) as exc:
-            raise ReadFailure("read_failed", "内核日志 JSON 格式无法解析") from exc
-    if not records:
-        return {"status": "no_history" if window == "previous" else "no_logs",
-                "message": "该范围没有可读取的内核日志，无法据此判断设备正常", "records": [], "limited": False}
-    return {"status": "ok", "message": "已读取内核及休眠服务日志", "records": records,
-            "limited": len(records) >= count or shortened, "recordCount": len(records), "recordLimit": count}
+            raw = message
+        elif isinstance(message, list):
+            # Preserve the journal's binary MESSAGE representation, never invent text.
+            raw = json.dumps(message, ensure_ascii=False)
+        else:
+            skipped = True
+            continue
+        fields = " ".join(f"{key}={row[key]}" for key in FIELDS if key != "MESSAGE" and key in row)
+        records.append((number(row.get("__MONOTONIC_TIMESTAMP")), number(row.get("__REALTIME_TIMESTAMP")), fields + "\n" + raw + "\n"))
+    records.sort(key=lambda row: (row[0], row[1]))
+    kept, size = [], 0
+    limited = count >= MAX_RECORDS or skipped
+    for _, _, raw in reversed(records):
+        amount = len(raw.encode("utf-8"))
+        if size + amount > MAX_TEXT_BYTES:
+            limited = True
+            continue
+        kept.append(raw)
+        size += amount
+    kept.reverse()
+    return {"status": "ok" if records else "no_logs", "message": "日志已截断" if limited else ("" if records else "本次启动暂无可读取的相关日志"),
+            "text": "".join(kept), "limited": limited}
