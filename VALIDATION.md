@@ -1,5 +1,41 @@
 # 验证记录
 
+## v0.5.5 游戏模式授权与空日志修复
+
+日期：2026-10-19（Asia/Shanghai）。基于最新 main 的 v0.5.4 修改。验证环境为 Linux 容器，不具备 SteamOS 的 UDisks、polkit、活动 logind 会话或实际存储设备；以下自动化通过不代表实机挂载成功。
+
+### 根因与权限取舍
+
+- 用户提供的 `NotAuthorizedCanObtain` 说明挂载请求需要认证，后台无控制终端，CLI 无法建立文本认证代理。Konsole 中同一用户名能够挂载，不能证明后台获得了同样的活动会话、seat 或授权主体。`--no-user-interaction` 只禁止请求交互，不赋予权限；修改 HOME、USER 或会话总线环境变量也不会改变系统总线所见的真实调用者。
+- 再次核对 [Decky Loader 的凭据设置](https://github.com/SteamDeckHomebrew/decky-loader/blob/67196adfa9b299f20dfb0cc932e88a169417b7d5/backend/decky_loader/plugin/sandboxed_plugin.py)：非 root 分支设置 UID/GID，没有初始化登录补充组。因此不能把后台 journal 访问能力和 Konsole 视为相同。实际设备的 UID、补充组、logind 会话和 seat 仍需实机读回，不能从容器推断。
+- 采用明确声明 `flags=["root"]` 的后端，通过原生 UDisks 系统总线接口执行固定的 Mount / Unmount。后端具有完整 root 权限，这是相对于非 root 版的安全代价，不能称为操作系统沙箱隔离。对外接口仍只接受后端生成的短期、单次、动作绑定授权，不接受任意设备路径、命令或 D-Bus 方法。
+- Mount 明确传入原生 `as-user=经用户数据库及 Decky 元数据交叉验证的普通用户`，真实总线调用者保持 root，接受系统服务自身的授权检查。不伪造登录会话、不降低子进程 UID 后假定授权、不调用 sudo/pkexec、不修改全局策略或组、不保存密码。直接调用不会创建文本认证代理；禁用交互授权，拒绝后不以其他身份重试。
+- 已核对 [UDisks 2.10.0 源码](https://github.com/storaged-project/udisks/blob/udisks-2.10.0/src/udiskslinuxfilesystem.c) 与 [原生接口说明](https://github.com/storaged-project/udisks/blob/udisks-2.10.0/data/org.freedesktop.UDisks2.xml)：该版本开始支持 `as-user`，由指定用户决定默认挂载目录与挂载归属；仍尊重 fstab。2.9.4 不支持此选项。操作前读取运行中服务的 Version，不足 2.10.0 或格式不明时，在卸载或挂载前停止，避免旧服务忽略选项并使用 root 目录。未使用可能包含修复步骤的自动挂载脚本。
+- 操作前增加 UDisks DeviceNumber / UUID / 文件系统与扫描结果比对；fstab 挂载位置需通过系统目录、root 目录、路径别名和插件承载路径校验。若 fstab 会忽略所要求的只读选项，则操作前拒绝。总线查询后再次检查真实设备、sysfs、连接序号、挂载状态和操作用户。操作后必须读取实际挂载状态、文件系统、读写保护，并与 UDisks 返回路径一致，才能成功；异常目录或未确认状态只报告不确定，不自动补救。保留安全卸载、busy 失败、系统盘保护、原地二次确认及请求中断保护。
+
+### 日志修复与限制
+
+- 原代码把 kernel 与服务做合并查询后只取最后 2000 条，再在 Python 中过滤。不相关的近期 kernel 消息可能挤掉较早的 MMC / EXT4 等记录，这是代码中可复现的空日志原因。实机是否还受到组、journal ACL 或日志缺失影响，尚不能据此断言。
+- 改为在 journal 内先匹配相关 kernel 消息，再取有界尾部；另行读取 UDisks 和休眠服务并按原始微秒时间排序、去重。保持原始 MESSAGE、来源、本地日期时间和全屏页面；不分析、翻译或保存日志。两路各最多 2000 条、各 2 MiB 输出，显示总计最多 2000 条 / 48 KiB。
+- 主查询无可显示记录时，同时执行五个只读对照：无筛选当前启动、当前 kernel、MMC/SDHCI/文件系统、UDisks、旧完整查询。每路仅 20 条 / 128 KiB / 2 秒，全部读取总期限 10 秒；未扩大为无限日志读取。不相关的对照原文不会进入显示或复制，只显示条数及真实进程凭据。仅两个明确存储范围的探测可恢复显示相关记录，并提示范围有限。
+- 区分权限不足（包括退出0但 stderr 带部分可见 hint）、所有探测为空而无法确认 journal 可用、可读取但无匹配项、查询有记录但被过滤为空和查询异常。非 root 后台不能用仅有用户日志证明系统 journal 完整；有有效记录则保留可读原文并提示限制。`--grep` 无匹配且无错误的退出1单独处理，不吞掉其他错误。旧页面内容在失败时保留。
+
+### 已完成验证
+
+- `npm run package`：TypeScript 检查、103 项 Python 测试、Rollup、前端交互及安装包独立加载通过。ZIP 顶层为完整 `external-storage-guard/`，含 dist/index.js、plugin.json、package.json、main.py 和后端模块，固定名称 External-Storage-Guard.zip。
+- 新增原生总线参数、版本拒绝、设备号/UUID/文件系统不符、fstab root/系统/插件目录拒绝、只读保护、真实路径与返回路径不符、预检期间设备更换、用户变化、无控制终端与认证失败分类，以及五路日志对照、部分权限、筛选空、服务器先筛选后取尾部、无匹配退出1的测试。
+- 包内后端在真实无输入终端的测试进程中运行，读回父子 UID、GID、补充组和 HOME，确认不切换凭据；并以真实临时 D-Bus 验证 busctl JSON 的 GetAll 格式。没有在测试中建立虚构的 polkit 授权环境，也没有执行实际挂载。模拟命令成功及扫描变化仅验证状态机，不能证明设备会授权。
+- 全屏前端实际编译包测试继续禁止访问 ReactRouter.useLocation，验证返回/刷新/复制/滚动、权限失败及新增不确定日志状态保留原文，并正常显示有效原始记录。
+
+### SteamOS 实机验收（尚未执行）
+
+1. 安装 v0.5.5 安装包并重新加载插件或重启 Decky，核对版本，确认后端按新 manifest 启动。只读检查后台实际 UID/EUID、GID、补充组、控制终端及 `loginctl show-session self`，并与 Konsole 对照；不能用设置 USER/HOME 代替这些结果。若系统服务不支持 `as-user`，应在卸载前明确拒绝，不改系统授权规则。
+2. 备份 MicroSD 数据并退出相关程序。在 ROG Ally X 游戏模式点击“卸载 → 确认卸载”：实际分区应未挂载，挂载按钮可用；再点击“挂载”，独立核对 `/dev/mmcblk0p1` 的真实挂载目录、EXT4 和读写状态。该设备预期路径 `/run/media/deck/SN512`，不得出现 `/run/media/root/SN512`；确认原有 Steam 游戏库及游戏存档访问正常。原有自定义 fstab 目录应保留，不通过权限或 Steam 配置修改掩盖问题。
+3. 分别验证正在使用、取消确认、设备断连、只读、身份变化、返回码失败及成功但状态未变时的反馈。不得强制卸载、自动 fsck、恢复可写或重置设备。验证 USB SSD/HDD 与多分区目标隔离；卸载不代表设备断电。
+4. 在全屏日志页对照已知 MMC/SDHCI/EXT4、UDisks 和休眠消息，确认本地时间、原文、来源、返回、刷新、全部显示文本复制及手柄滚动。若仍为空，按提示区分五个对照结果和权限/查询状态，勿视为硬件健康。用同样的有界命令分别在后台实际凭据与 Konsole 执行，比较可见记录，不修改组或 journal ACL。长日志应明确截断。
+
+以下为历史版本记录，不代表当前 v0.5.5 仍采用非 root 后端。
+
 ## v0.5.4 非 root 后端与全屏日志崩溃修复
 
 日期：2026-10-19（Asia/Shanghai）。自动化环境为 Linux 容器；用户提供的 ROG Ally X 实机结果只证明此前版本及 Konsole 行为，不视为本版实机通过。
