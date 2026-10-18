@@ -133,10 +133,13 @@ export function App() {
     expiry.current = setTimeout(cancel, 15000);
   };
   const openLogs = () => {
-    if (running.current || !alive.current) return;
+    if (running.current || !alive.current || !homeVisible.current) return;
     cancel();
     homeVisible.current = false; // Block queued home callbacks before QAM visibility updates.
-    try { Router.CloseSideMenus(); Router.Navigate(LOG_ROUTE); }
+    try {
+      if (typeof Router?.CloseSideMenus !== "function" || typeof Router?.Navigate !== "function") throw new Error("Steam 导航接口不可用");
+      Router.CloseSideMenus(); Router.Navigate(LOG_ROUTE);
+    }
     catch (error) { homeVisible.current = visible; setMessage(`日志页面打开失败：${error instanceof Error ? error.message : "导航不可用"}`); }
   };
   useEffect(() => { homeVisible.current = visible; if (!visible) cancel(); }, [visible]);

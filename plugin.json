@@ -1,9 +1,7 @@
 {
   "name": "External Storage Guard",
   "author": "ohxiaoguang",
-  "flags": [
-    "root"
-  ],
+  "flags": [],
   "api_version": 1,
   "publish": {
     "tags": [

@@ -1,5 +1,29 @@
 # 验证记录
 
+## v0.5.4 非 root 后端与全屏日志崩溃修复
+
+日期：2026-10-19（Asia/Shanghai）。自动化环境为 Linux 容器；用户提供的 ROG Ally X 实机结果只证明此前版本及 Konsole 行为，不视为本版实机通过。
+
+- 明确根因：v0.5.3 LogPage 使用 `@decky/ui` 动态导出的 ReactRouter.useLocation，实际 Steam 环境没有该函数；旧交互测试桩提供了它而漏检。此次完全删除该导入 / Hook / pathname 状态，不伪造 Hook，也不换回弹窗或侧栏条件页面。测试 DFL.ReactRouter getter 一旦被访问就抛错，包内真实 LogPage 仍能渲染并请求日志。
+- 核对 [Loader sandboxed_plugin](https://github.com/SteamDeckHomebrew/decky-loader/blob/67196adfa9b299f20dfb0cc932e88a169417b7d5/backend/decky_loader/plugin/sandboxed_plugin.py#L72)：无 root 标志时，Loader 设置 HOST_USER 的 GID / UID，并设置普通用户 HOME / USER / DECKY_USER / DECKY_USER_HOME。plugin.json 改为 flags=[]，包验证也强制无 root。生产代码删除 DesktopUser、desktop_user、run(user=...)、user / group / extra_groups 切换及 grant 中的用户对象。
+- 身份校验改为读取真实进程 UID / GID / saved IDs，拒绝 root 或身份混用；按真实 UID 查询系统用户数据库，再与主组、Decky 元数据及 HOME 交叉确认。环境变量不能伪造内核身份。挂载、卸载和 journalctl / 设备扫描直接继承现有普通用户凭据，不调用 sudo / pkexec，不修改系统组、polkit 或游戏文件权限，不做 root 回退。
+- 补充组 / 会话：所核对 Loader 在这一启动路径调用 setgid / setuid，没有初始化登录补充组；不能假定与 Konsole 相同。插件不新增或修改补充组，原样继承实际权限。真实非 root 测试读回后端与子进程的 UID、GID、补充组、HOME，确认保持一致。普通 UID 不代表游戏模式具有交互终端的相同 journal ACL 或 polkit 会话授权；缺失权限必须实机核对并明确报错。
+- [Loader 安装权限](https://github.com/SteamDeckHomebrew/decky-loader/blob/67196adfa9b299f20dfb0cc932e88a169417b7d5/backend/decky_loader/browser.py#L120) 根据 root 标志选择插件文件属主，插件根目录保持可读 / 可遍历；[plugin.py](https://github.com/SteamDeckHomebrew/decky-loader/blob/67196adfa9b299f20dfb0cc932e88a169417b7d5/backend/decky_loader/plugin/plugin.py#L73) 为 HOST_USER 准备 data / settings / logs 目录。本插件没有持久化依赖；即使运行目录不存在，也可构造和使用后端。ZIP 被提取到临时目录后，以真实非 root 进程进行隔离导入、API / 生命周期及子进程验证，未修改任何实际安装或系统目录权限。
+- UDisks 保持 --no-user-interaction。[上游 CLI](https://github.com/storaged-project/udisks/blob/master/tools/udisksctl.c) 将该参数传成 auth.no_user_interaction=true，禁止需要时交互认证；不能将 Konsole 未加此参数的成功等同于 Decky 成功。测试覆盖权限拒绝后单次安全失败，无其他身份重试。现有返回码、stdout / stderr、实际 mount / unmount、分区与 sysfs / 系统盘校验、RO 及错误 root 路径保护不变，自定义目录不被强行替换。
+- 路由保留 addRoute / CloseSideMenus / Navigate 和官方 NavigateBack。返回仅由用户操作触发并防重复；缺失 / 抛错接口提供可读提示，失败不吞掉 Steam 原生取消事件。React 清理及插件 onDismount 不推断当前路由、不调用 NavigateBack。插件卸载只停止页面更新并幂等注销路由，旧回调不能删除重载后的新路由；不改变 Steam 回退历史。
+- 日志保持原筛选、本次启动、本地日期 / 毫秒、原始 MESSAGE 和来源、2000 条 / 48 KiB 显示 / 4 MiB 查询 / 10 秒限制；未恢复内部元数据。权限 hint 即使退出0或返回部分记录，也报告 permission_denied，不误报无日志。网络拒绝、异常返回对象和读取失败在页面内显示原因并保留原文，不进入 React 错误页。复制与显示原文一致。
+- `npm run package`：严格 TypeScript、77 项 Python 测试、前端交互、Rollup、安装 ZIP 及非 root 包内后端 / 前端 ESM 验证通过。测试调整为真实普通用户启动整个后端，凭据及组原样继承；身份不可确认、root / saved-root、防提权及双操作拒绝；原卸载确认与目标安全测试继续通过。运行时测试不提供 ReactRouter，覆盖读取失败 / 无日志 / 无效响应、导航缺失与异常、重复进入 / 返回、无导航清理、幂等卸载及重新注册、刷新 / 复制 / 截断 / 手柄和键盘滚动。删除的旧切换测试不再表示本版行为。
+
+### SteamOS 实机验收
+
+1. 安装本版 External-Storage-Guard.zip，确认 Decky 显示 0.5.4。插件后端应重新启动为普通用户；若提示身份异常，重新加载插件或重启 Decky。不要用 sudo 或修改组 / polkit 来绕过插件报错。
+2. 对已备份的 MicroSD，先关闭相关程序，再执行“卸载 → 确认卸载 → 挂载”。确认普通用户默认路径仍为 `/run/media/实际用户名/卷名`，该设备预期 `/run/media/deck/SN512`，并独立检查实际文件系统及读写状态、Steam 现有游戏是否可用。取消、15 秒失效、busy 和未验证状态不能报成功；保留 USB 与既有自定义目录。
+3. 在游戏模式核对后端实际 UID / GID、补充组及 HOME，尤其与 Konsole 环境差异。两条 UDisks 操作实际使用 --no-user-interaction，若系统拒绝则应显示权限不足并停止；日志读取不足时也必须明确报权限错误，不改成“没有日志”。
+4. 点击查看日志，确认侧栏关闭并显示 Steam 全屏页，不再出现 useLocation 错误。测试刷新、原文复制、截断、手柄 / 触摸 / 鼠标滚动，以及本地时间与系统记录一致；测试返回并再次打开。
+5. 重复进入和返回、更新 / 停用插件时检查没有重复导航、无效注册残留或 React 崩溃。停用时插件不会盲目改变当前 Steam 回退历史；正在查看页时的实际 Steam 路由移除表现仍需实机确认。
+
+尚未在真实 SteamOS 上验证本版普通用户进程的 polkit / journal 权限、设备挂载卸载、游戏库、Steam 导航热更新和焦点 / 缩放 / CEF 剪贴板。测试框架的凭据降低只用于模拟 Loader 启动；生产插件中没有身份切换或提权代码。未在容器执行实际设备挂载、卸载、修复或格式化。
+
 ## v0.5.3 桌面用户挂载与全屏日志
 
 日期：2026-10-19（Asia/Shanghai）。以下结果来自 Linux 容器，不代表真实 SteamOS 验收。

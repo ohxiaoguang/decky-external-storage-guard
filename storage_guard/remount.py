@@ -9,7 +9,7 @@ import re
 import secrets
 import stat
 import time
-from .commands import DesktopUser, ReadFailure, desktop_user, run
+from .commands import ReadFailure, current_user, run
 from .devices import scan, sysfs_facts
 
 FILESYSTEMS = {"ext4", "exfat", "ntfs", "ntfs3"}
@@ -146,11 +146,10 @@ class Grant:
     expires: float
     action: str
     options: list[str]
-    user: DesktopUser | None = None
 
 
 def desktop_options(user):
-    return ["nosuid", "nodev", f"uid={user.uid}", f"gid={user.gid}"]
+    return ["nosuid", "nodev", f"uid={user.pw_uid}", f"gid={user.pw_gid}"]
 
 
 class PartitionManager:
@@ -168,15 +167,14 @@ class PartitionManager:
                 for action in ("unmount", "mount"):
                     reason = eligibility(device, part, action == "unmount")
                     options = []
-                    user = None
                     if not reason:
                         fingerprint = identity(device, part)
                         active.add(fingerprint)
                         try:
+                            user = current_user()
                             if action == "unmount":
                                 options = mount_options(part, current_readonly(part))
                             else:
-                                user = desktop_user()  # Required for ext4 too, including cached options.
                                 options = self.options.get(fingerprint)
                                 if options is None:
                                     options = [] if part["filesystem"] == "ext4" else desktop_options(user)
@@ -188,7 +186,7 @@ class PartitionManager:
                     token = None
                     if not reason and len(self.grants) < 256:
                         token = secrets.token_urlsafe(32)
-                        self.grants[token] = Grant(fingerprint, device["id"], part["path"], deepcopy(part["mounts"]), time.monotonic() + TOKEN_TTL, action, options, user)
+                        self.grants[token] = Grant(fingerprint, device["id"], part["path"], deepcopy(part["mounts"]), time.monotonic() + TOKEN_TTL, action, options)
                     elif not reason:
                         reason = "操作分区数量超过上限"
                     part["actions"][action] = {"token": token, "reason": reason}
@@ -219,9 +217,7 @@ class PartitionManager:
         if progress:
             progress(result)
         try:
-            user = desktop_user() if action == "mount" else None
-            if action == "mount" and user != grant.user:
-                raise ReadFailure("stale_target", "桌面用户身份已变化，请刷新后重试")
+            current_user()
             _, part = await self.target(grant, action == "unmount", original=True)
             if action == "unmount" and grant.fingerprint not in self.options and len(self.options) >= 256:
                 raise ReadFailure("unavailable", "当前会话可保留的安全挂载选项已达上限，未执行卸载")
@@ -234,10 +230,7 @@ class PartitionManager:
             argv = ["udisksctl", action, "-b", grant.path, "--no-user-interaction"]
             if action == "mount" and options:
                 argv.extend(["--options", ",".join(options)])
-            if action == "mount":
-                output = await run(argv, timeout=20, limit=65536, user=user)
-            else:
-                output = await run(argv, timeout=20, limit=65536)
+            output = await run(argv, timeout=20, limit=65536)
             result.update(returncode=output.code, stdout=output.stdout[:1000], stderr=output.stderr[:1000])
             self.command_result(output, action)
             result["phase"] = "verify"
