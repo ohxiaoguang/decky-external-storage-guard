@@ -6,11 +6,10 @@ import json
 import os
 from pathlib import Path
 import re
-import pwd
 import secrets
 import stat
 import time
-from .commands import ReadFailure, run
+from .commands import DesktopUser, ReadFailure, desktop_user, run
 from .devices import scan, sysfs_facts
 
 FILESYSTEMS = {"ext4", "exfat", "ntfs", "ntfs3"}
@@ -147,16 +146,11 @@ class Grant:
     expires: float
     action: str
     options: list[str]
+    user: DesktopUser | None = None
 
 
-def desktop_options():
-    try:
-        user = pwd.getpwnam(os.environ.get("DECKY_USER", ""))
-        if user.pw_uid == 0 or (os.environ.get("DECKY_USER_HOME") and os.environ["DECKY_USER_HOME"] != user.pw_dir):
-            raise ValueError("untrusted user")
-    except (KeyError, ValueError) as exc:
-        raise ReadFailure("unsupported_permissions", "无法确认桌面用户，禁止以默认 root 权限挂载非 Linux 文件系统") from exc
-    return ["nosuid", "nodev", f"uid={user.pw_uid}", f"gid={user.pw_gid}"]
+def desktop_options(user):
+    return ["nosuid", "nodev", f"uid={user.uid}", f"gid={user.gid}"]
 
 
 class PartitionManager:
@@ -174,6 +168,7 @@ class PartitionManager:
                 for action in ("unmount", "mount"):
                     reason = eligibility(device, part, action == "unmount")
                     options = []
+                    user = None
                     if not reason:
                         fingerprint = identity(device, part)
                         active.add(fingerprint)
@@ -181,9 +176,10 @@ class PartitionManager:
                             if action == "unmount":
                                 options = mount_options(part, current_readonly(part))
                             else:
+                                user = desktop_user()  # Required for ext4 too, including cached options.
                                 options = self.options.get(fingerprint)
                                 if options is None:
-                                    options = [] if part["filesystem"] == "ext4" else desktop_options()
+                                    options = [] if part["filesystem"] == "ext4" else desktop_options(user)
                                 options = list(options)
                                 if current_readonly(part) and "ro" not in options:
                                     options.insert(0, "ro")
@@ -192,7 +188,7 @@ class PartitionManager:
                     token = None
                     if not reason and len(self.grants) < 256:
                         token = secrets.token_urlsafe(32)
-                        self.grants[token] = Grant(fingerprint, device["id"], part["path"], deepcopy(part["mounts"]), time.monotonic() + TOKEN_TTL, action, options)
+                        self.grants[token] = Grant(fingerprint, device["id"], part["path"], deepcopy(part["mounts"]), time.monotonic() + TOKEN_TTL, action, options, user)
                     elif not reason:
                         reason = "操作分区数量超过上限"
                     part["actions"][action] = {"token": token, "reason": reason}
@@ -223,6 +219,9 @@ class PartitionManager:
         if progress:
             progress(result)
         try:
+            user = desktop_user() if action == "mount" else None
+            if action == "mount" and user != grant.user:
+                raise ReadFailure("stale_target", "桌面用户身份已变化，请刷新后重试")
             _, part = await self.target(grant, action == "unmount", original=True)
             if action == "unmount" and grant.fingerprint not in self.options and len(self.options) >= 256:
                 raise ReadFailure("unavailable", "当前会话可保留的安全挂载选项已达上限，未执行卸载")
@@ -235,7 +234,10 @@ class PartitionManager:
             argv = ["udisksctl", action, "-b", grant.path, "--no-user-interaction"]
             if action == "mount" and options:
                 argv.extend(["--options", ",".join(options)])
-            output = await run(argv, timeout=20, limit=65536)
+            if action == "mount":
+                output = await run(argv, timeout=20, limit=65536, user=user)
+            else:
+                output = await run(argv, timeout=20, limit=65536)
             result.update(returncode=output.code, stdout=output.stdout[:1000], stderr=output.stderr[:1000])
             self.command_result(output, action)
             result["phase"] = "verify"
@@ -244,6 +246,14 @@ class PartitionManager:
             _, actual = await self.target(grant, action == "mount")
             result.update(mounts=deepcopy(actual["mounts"]), readOnly=current_readonly(actual))
             if action == "mount":
+                drivers = {"ext4": {"ext4"}, "exfat": {"exfat", "fuse.exfat", "fuseblk"},
+                           "ntfs": {"ntfs", "ntfs3", "fuseblk"}, "ntfs3": {"ntfs", "ntfs3", "fuseblk"}}
+                if any(m.get("filesystem") not in drivers[actual["filesystem"]] for m in actual["mounts"]):
+                    raise ReadFailure("verification_failed", "未确认实际挂载的文件系统类型，请核对状态")
+                # Let UDisks/fstab choose legitimate custom paths. Never accept the
+                # known wrong root-user automount path as a successful user mount.
+                if any(m["target"] == "/run/media/root" or m["target"].startswith("/run/media/root/") for m in actual["mounts"]):
+                    raise ReadFailure("verification_failed", "分区挂载到了 root 用户目录；未确认正确挂载，请核对实际路径")
                 actual_options = mount_options(actual, result["readOnly"])
                 if not set(options).issubset(actual_options):
                     raise ReadFailure("verification_failed", "未确认挂载权限或只读保护，请核对实际状态")

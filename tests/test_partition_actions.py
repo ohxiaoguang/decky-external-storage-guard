@@ -3,10 +3,9 @@ from copy import deepcopy
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
-from storage_guard.commands import Output, ReadFailure
+from storage_guard.commands import DesktopUser, Output, ReadFailure
 from storage_guard.remount import PartitionManager
 from storage_guard.service import Service
 from test_remount import managed_device, inventory
@@ -18,6 +17,10 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.unmounted = deepcopy(self.device)
         self.unmounted["partitions"][1]["mounts"] = []
         self.manager = PartitionManager()
+        self.user = DesktopUser("gamer", 1000, 1000, "/home/gamer", (10, 1000))
+        patcher = patch("storage_guard.remount.desktop_user", return_value=self.user)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def grant(self, action, device=None):
         self.manager.decorate([device or (self.device if action == "unmount" else self.unmounted)])
@@ -44,6 +47,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(result["mounts"][0]["target"], "/run/media/deck/card")
         self.assertFalse(result["readOnly"])
+        self.assertEqual(command.call_args.kwargs["user"], self.user)
         self.assertEqual(command.call_args.args[0], ["udisksctl", "mount", "-b", "/dev/mmcblk0p1", "--no-user-interaction"])
 
     async def test_exit_zero_without_actual_transition_is_uncertain(self):
@@ -150,16 +154,15 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_nonlinux_fresh_mount_uses_verified_desktop_uid_gid_or_refuses(self):
         self.unmounted["partitions"][1]["filesystem"] = "exfat"
-        with patch.dict(os.environ, {"DECKY_USER": "deck", "DECKY_USER_HOME": "/home/deck"}), patch(
-            "storage_guard.remount.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir="/home/deck")):
-            token = self.grant("mount")
-            self.assertEqual(self.manager.grants[token].options, ["nosuid", "nodev", "uid=1000", "gid=1000"])
-        with patch("storage_guard.remount.pwd.getpwnam", side_effect=KeyError("unknown")):
+        token = self.grant("mount")
+        self.assertEqual(self.manager.grants[token].options, ["nosuid", "nodev", "uid=1000", "gid=1000"])
+        with patch("storage_guard.remount.desktop_user", side_effect=ReadFailure("unsupported_permissions", "unknown user")):
             self.manager.decorate([self.unmounted])
             self.assertIsNone(self.unmounted["partitions"][1]["actions"]["mount"]["token"])
 
     async def test_preserved_nonlinux_options_bound_to_verified_connection_and_ro(self):
         self.device["partitions"][1]["filesystem"] = "exfat"
+        self.device["partitions"][1]["mounts"][0]["filesystem"] = "exfat"
         self.device["partitions"][1]["mounts"][0].update(options="ro,nosuid,nodev,uid=1000,gid=1000,fmask=0022", readOnly=True)
         self.unmounted = deepcopy(self.device)
         self.unmounted["partitions"][1]["mounts"] = []
@@ -171,7 +174,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(flag, command.call_args.args[0][-1].split(","))
         changed = deepcopy(self.unmounted)
         changed["sysfs"]["diskseq"] = "different"
-        with patch("storage_guard.remount.pwd.getpwnam", side_effect=KeyError("no desktop identity")):
+        with patch("storage_guard.remount.desktop_user", side_effect=ReadFailure("unsupported_permissions", "no desktop identity")):
             self.manager.decorate([changed])
             self.assertIsNone(changed["partitions"][1]["actions"]["mount"]["token"])
 
@@ -182,6 +185,69 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "uncertain")
         self.assertFalse(result["verified"])
         self.assertEqual(command.call_count, 1)
+
+    async def test_mount_unknown_user_never_gets_grant_even_with_cached_ext4_options(self):
+        await self.perform("unmount", [self.device, self.unmounted])
+        for filesystem in ("ext4", "exfat", "ntfs"):
+            self.unmounted["partitions"][1]["filesystem"] = filesystem
+            with patch("storage_guard.remount.desktop_user", side_effect=ReadFailure("unsupported_permissions", "无法确认桌面用户")):
+                self.manager.decorate([self.unmounted])
+            self.assertIsNone(self.unmounted["partitions"][1]["actions"]["mount"]["token"])
+
+    async def test_user_unavailable_or_changed_after_grant_never_executes_or_falls_back(self):
+        for context in (ReadFailure("unsupported_permissions", "unknown desktop user"),
+                        DesktopUser("other", 1001, 1001, "/home/other", (1001,))):
+            token = self.grant("mount")
+            options = {"side_effect": context} if isinstance(context, Exception) else {"return_value": context}
+            with patch("storage_guard.remount.desktop_user", **options):
+                result, command = await self.perform("mount", [self.unmounted], token=token)
+            self.assertFalse(result["verified"])
+            command.assert_not_called()
+
+    async def test_wrong_root_mount_path_is_uncertain_without_additional_device_changes(self):
+        final = deepcopy(self.device)
+        final["partitions"][1]["mounts"][0]["target"] = "/run/media/root/SN512"
+        result, command = await self.perform("mount", [self.unmounted, final])
+        self.assertEqual(result["status"], "uncertain")
+        self.assertFalse(result["verified"])
+        self.assertIn("root 用户目录", result["message"])
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(command.call_args.kwargs["user"], self.user)
+
+    async def test_user_mount_preserves_custom_paths_on_sd_and_usb(self):
+        for usb, target in ((False, "/run/media/gamer/SN512"), (False, "/mnt/My Games"), (True, "/media/USB SSD")):
+            self.device = managed_device(usb)
+            self.device["partitions"][1]["mounts"][0]["target"] = target
+            self.unmounted = deepcopy(self.device)
+            self.unmounted["partitions"][1]["mounts"] = []
+            result, command = await self.perform("mount", [self.unmounted, self.device])
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["mounts"][0]["target"], target)
+            self.assertEqual(command.call_args.kwargs["user"], self.user)
+            self.assertNotIn(target, command.call_args.args[0])
+
+    async def test_user_mount_authorization_denial_stops_without_root_retry(self):
+        result, command = await self.perform("mount", [self.unmounted], Output(1, "", "Not authorized to perform operation"))
+        self.assertEqual(result["status"], "permission_denied")
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["returncode"], 1)
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(command.call_args.kwargs["user"], self.user)
+
+    async def test_wrong_mount_filesystem_after_command_is_uncertain(self):
+        final = deepcopy(self.device)
+        final["partitions"][1]["mounts"][0]["filesystem"] = "vfat"
+        result, command = await self.perform("mount", [self.unmounted, final])
+        self.assertEqual(result["status"], "uncertain")
+        self.assertFalse(result["verified"])
+        self.assertIn("文件系统类型", result["message"])
+
+    async def test_unmount_unchanged_when_desktop_user_cannot_be_confirmed(self):
+        with patch("storage_guard.remount.desktop_user", side_effect=ReadFailure("unsupported_permissions", "no user")) as user:
+            result, command = await self.perform("unmount", [self.device, self.unmounted])
+        self.assertEqual(result["status"], "success")
+        user.assert_not_called()
+        self.assertNotIn("user", command.call_args.kwargs)
 
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):

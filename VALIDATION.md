@@ -1,5 +1,29 @@
 # 验证记录
 
+## v0.5.3 桌面用户挂载与全屏日志
+
+日期：2026-10-19（Asia/Shanghai）。以下结果来自 Linux 容器，不代表真实 SteamOS 验收。
+
+- 现场依据：用户已在 ROG Ally X / SteamOS 验证 v0.5.2 卸载成功，但 EXT4 再挂载到 `/run/media/root/SN512`，以普通用户挂载后恢复 `/run/media/deck/SN512` 及游戏识别。源码确认旧 mount 子进程继承 root，ext4 没有进行桌面用户身份切换。此问题不是文件系统修复需求。
+- 机制核对：[Decky Loader 用户环境初始化](https://github.com/SteamDeckHomebrew/decky-loader/blob/67196adfa9b299f20dfb0cc932e88a169417b7d5/backend/decky_loader/plugin/sandboxed_plugin.py#L72) 明确区分 root 插件与 DECKY_USER / DECKY_USER_HOME；[UDisks 挂载实现](https://github.com/storaged-project/udisks/blob/master/src/udiskslinuxfilesystem.c) 根据真实 D-Bus 调用者 UID 获取用户名并选择默认用户目录，不能只改 HOME。继续由 UDisks / polkit 正常授权，不添加规则、不使用 as-user 冒充或 root 回退。
+- 挂载：以 Decky 元数据和系统用户数据库交叉验证非 root UID / GID / 主目录 / 附加组，所有文件系统和已缓存选项的挂载都必须通过。挂载授权绑定该用户，执行前重新确认；在用户查询完成后重新扫描设备并做 sysfs 检查。仅子进程通过 Python 的数值 user / group / extra_groups 参数切换身份，父进程仍可读系统信息；无 preexec_fn、shell 或全局 setuid。子进程使用干净环境和 `/` 工作目录，避免继承 root 的 HOME / D-Bus / 动态库环境。
+- 结果：继续核对退出码、分区身份、真实挂载路径、文件系统驱动和读写 / RO 状态。错误 root 自动挂载目录为不确定，不自动卸载或修复。UDisks 选择的 `/mnt`、`/media` 等既有受支持自定义路径不被强改。成功仅表示文件系统挂载经过验证，不表示 Steam 游戏库已经识别。卸载命令及其安全验证流程不变。
+- 路由：参考 [Decky Clash 的真实入口和路由](https://github.com/chenx-dust/DeckyClash/blob/a9a78b6afb2f536d9a305c3b8000cf521a404d3c/src/index.tsx#L677)，使用当前锁定的 @decky/api 1.1.3 / @decky/ui 4.15.1 的 routerHook.addRoute、Router.CloseSideMenus / Navigate 和 Navigation.NavigateBack。在 Steam 路由中直接渲染唯一日志页，不需要 SidebarNavigation 的多页侧栏；没有 showModal，也没有在 QAM 内模拟全屏。
+- 生命周期：官方 [PluginView](https://github.com/SteamDeckHomebrew/decky-loader/blob/67196adfa9b299f20dfb0cc932e88a169417b7d5/frontend/src/components/PluginView.tsx#L46) 在 QAM 隐藏时默认不渲染 content，因此使用官方 alwaysRender 保留主页。关闭 QAM 会撤销未确认卸载，不增加后台轮询。返回退出日志路由并保留有效路由注册供下次使用；插件卸载时退出当前日志路由、停止页面更新并 removeRoute，避免残留。重复返回不会越过上一页。
+- 日志：继续仅查询本次开机的 kernel / systemd / udisks2 相关真实消息；用整数微秒排序，后端按设备本地时区转换一次为 `YYYY-MM-DD HH:mm:ss.SSS source: MESSAGE`，不展示内部字段。MESSAGE（含换行）保持原样，未知 / 无效时间明确显示未知；不回退编造源时间。保持 2000 条 / 48 KiB 显示、4 MiB 查询及 10 秒超时，完整记录截断提示和游戏模式复制上限不变，不额外保存文件。
+- 自动化：`npm run package` 包括严格 TypeScript、75 项 Python 测试、Rollup、Decky ZIP / 隔离后端和前端 ESM / 交互验证。新增真实子进程读回 UID / GID / 附加组、父进程身份未变；身份缺失 / root / 变化、权限切换失败、UDisks 拒绝授权无 root 重试、错误 root 目录、SD / USB 自定义路径、实际文件系统不符；系统盘和只读保护测试保留。日志覆盖 UTC / Asia-Shanghai 跨日、夏令时、微秒精度、真实时间排序、缺失与越界时间、来源和 MESSAGE 保真、空日志及上限。交互覆盖路由注册、关闭 QAM 后导航、返回 / 手柄 B、主页状态保留、卸载注销、刷新与逐字复制；原地确认测试继续通过。
+
+### SteamOS 实机验收
+
+1. 安装本版 Release 的 External-Storage-Guard.zip，确认版本为 0.5.3，关闭占用目标分区的游戏和程序。先备份重要数据；内置 SSD 不应出现在操作列表中。
+2. 对 ROG Ally X 的已知 MicroSD 分区执行“卸载 → 确认卸载”，用系统磁盘工具或 findmnt 核对真实未挂载；取消、15 秒过期、忙碌失败行为应与 v0.5.2 一致。
+3. 点击“挂载”，核对实际目标是当前桌面用户对应路径（该实机预期 `/run/media/deck/SN512`），而不是 `/run/media/root/SN512`；独立核对 EXT4、路径及 RO / RW。再到 Steam 检查原游戏库，并启动一个已有游戏确认识别。插件不编辑库配置，不把“已挂载”当作库已识别。若权限被拒绝，应看到失败原因，不能出现 root 回退挂载。
+4. 对 USB SSD / HDD 及合法自定义挂载目录做同样检查，路径应由 UDisks / 现有系统配置决定，不被强制替换。非 Linux 文件系统额外核对原访问权限；不改变游戏文件所有权。
+5. 点击“查看日志”，确认 Decky 侧栏关闭，日志显示在 Steam 全屏页而不是侧栏。分别在 1280×800、1920×1080 和常用缩放下检查标题、返回 / 刷新 / 复制、文本换行及滚动，手柄从文本顶部上移应能回到按钮；触屏与鼠标可滚动。
+6. 核对日志日期时间与掌机当前时区下的系统日志一致，MESSAGE 原文不变。刷新后复制并粘贴核对全文；系统没有日志时明确提示。返回应回到原 Steam 页面，重新打开插件无需重新初始化；可手动刷新设备状态。重复进入、退出及停用 / 卸载插件后不应留下无效路由。
+
+当前环境不能验证真实 SteamOS 的 polkit 会话授权、UDisks / fstab 策略、MicroSD 游戏库恢复、USB 驱动兼容性、Steam 路由布局及焦点、真实 CEF 剪贴板。真实凭据切换测试只运行无磁盘操作的 Python 子进程；没有在容器执行任何实际存储挂载、卸载、修复或格式化。
+
 ## v0.5.2 无弹窗交互修复
 
 日期：2026-10-19（Asia/Shanghai）。以下自动化结果来自 Linux 容器，尚未进行真实 SteamOS 验收。
