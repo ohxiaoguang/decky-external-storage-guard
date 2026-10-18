@@ -118,6 +118,18 @@ const historyHost = new Host();
 const historyTree = historyHost.render(historyElement.type, { ...historyElement.props, onSelect: id => { selected = id; } });
 find(historyTree, x => x.type === "ButtonItem")[0].props.onClick();
 assert.equal(selected, "cycle");
+sleep.cycles[0].timeline = Array.from({ length: 21 }, (_, i) => ({ timestamp: i, realtimeUs: i * 1000, monotonicUs: i * 1000,
+  source: "sleep", kind: "cache_enable", phase: ["before_suspend", "during_unknown", "after_wake"][i % 3],
+  message: `MMC power raw row ${i}`, estimated: true }));
+let expanded = historyHost.render(historyElement.type, { ...historyElement.props, selected: "cycle" });
+assert.match(flattenText(expanded), /休眠前/);
+assert.match(flattenText(expanded), /时序不确定/);
+assert.match(flattenText(expanded), /唤醒后/);
+assert.match(flattenText(expanded), /MMC power raw row 19/);
+assert.doesNotMatch(flattenText(expanded), /MMC power raw row 20/);
+find(expanded, x => x.type === "ButtonItem" && flattenText(x.props.children).startsWith("时间线下一页"))[0].props.onClick();
+expanded = historyHost.render(historyElement.type, { ...historyElement.props, selected: "cycle" });
+assert.match(flattenText(expanded), /MMC power raw row 20/);
 historyElement.props.onSelect("cycle");
 appTree = app.render(plugin.content.type, {});
 const eventElement = named(appTree, "EventList");

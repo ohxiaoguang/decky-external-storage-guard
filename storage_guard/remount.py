@@ -1,6 +1,7 @@
 """User-confirmed UDisks transactions. No forced unmount, auth bypass or repairs."""
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -198,17 +199,49 @@ class Remounter:
                 return device, part
         raise ReadFailure("device_disconnected", "设备已断开、分区已变化或不再允许操作，未继续执行")
 
+    async def command(self, argv, phase, result, progress):
+        entry = {"phase": phase, "argv": argv, "startedAt": datetime.now(timezone.utc).timestamp() * 1000,
+                 "finishedAt": None, "returncode": None, "stdout": "", "stderr": "", "status": "pending", "outputAvailable": False}
+        result["commands"].append(entry)
+        if progress:
+            progress(result, phase == "unmount")
+        try:
+            entry["status"] = "running"
+            output = await run(argv, timeout=20, limit=65536)
+            entry.update(returncode=output.code, outputAvailable=True, stdout=output.stdout[:4096], stderr=output.stderr[:4096],
+                         outputTruncated=len(output.stdout) > 4096 or len(output.stderr) > 4096)
+            self.command_result(output, phase)
+            entry["status"] = "returned_zero"
+        except (ReadFailure, OSError) as exc:
+            entry.update(status=getattr(exc, "status", "command_failed"), failure=str(exc)[:1000])
+            raise
+        finally:
+            entry["finishedAt"] = datetime.now(timezone.utc).timestamp() * 1000
+            if progress:
+                progress(result, False)
+
+    @staticmethod
+    def observation(part):
+        return {"observedAt": datetime.now(timezone.utc).timestamp() * 1000,
+                "path": part["path"], "majorMinor": part["majorMinor"],
+                "readOnly": part["readOnly"], "mounts": deepcopy(part["mounts"])}
+
     async def execute(self, token: str, boot: str, progress=None) -> dict:
         grant = self.grants.get(token) if isinstance(token, str) else None
         result = {"status": "invalid_target", "phase": "validation", "message": "设备操作授权无效、过期或已使用，请刷新后重新确认",
                   "detail": "", "partition": grant.path if grant else None, "unmounted": False,
-                  "mounted": None, "warnings": []}
+                  "mounted": None, "warnings": [], "operationId": secrets.token_hex(12), "bootId": boot,
+                  "startedAt": datetime.now(timezone.utc).timestamp() * 1000,
+                  "method": "udisksctl unmount + mount (noninteractive; no force)",
+                  "commands": [], "beforeUnmount": None, "afterUnmount": None, "afterMount": None}
         if not grant or grant.expires <= time.monotonic():
             return result
         # Consume all outstanding authorizations so double clicks and older views
         # cannot queue a second transaction against the same physical disk.
         self.grants.clear()
         try:
+            if progress:
+                progress(result, True)
             _, part = await self.target(grant, True)
             readonly = part["readOnly"] or any(m["readOnly"] for m in part["mounts"])
             try:
@@ -225,36 +258,40 @@ class Remounter:
             options = mount_options(part, readonly)
             # Reading logs can take time: revalidate mounts, diskseq and the block
             # node once more immediately before issuing the first mutation.
-            await self.target(grant, True)
+            _, before = await self.target(grant, True)
+            result["beforeUnmount"] = self.observation(before)
             result["phase"] = "unmount"
             if progress:
                 progress(result, True)
-            output = await run(["udisksctl", "unmount", "-b", grant.path, "--no-user-interaction"], timeout=20, limit=65536)
-            self.command_result(output, "unmount")
-            result["unmounted"] = True
-            result["mounted"] = False
-            result["phase"] = "mount"
+            await self.command(["udisksctl", "unmount", "-b", grant.path, "--no-user-interaction"], "unmount", result, progress)
+            # A zero exit is not proof that the mount disappeared.
+            result["unmounted"] = None
+            result["phase"] = "verify_unmount"
             if progress:
                 progress(result, False)
             # Verify disconnection/replacement and unexpected automount after
             # unmount; never mount a newly arrived disk reusing the same name.
-            await self.target(grant, False)
+            _, absent = await self.target(grant, False)
+            result["afterUnmount"] = self.observation(absent)
+            result["unmounted"] = True
+            result["mounted"] = False
+            result["phase"] = "mount"
             argv = ["udisksctl", "mount", "-b", grant.path, "--no-user-interaction"]
             if options:
                 argv.extend(["--options", ",".join(options)])
-            output = await run(argv, timeout=20, limit=65536)
-            self.command_result(output, "mount")
+            await self.command(argv, "mount", result, progress)
             result["phase"] = "verify"
             if progress:
                 progress(result, False)
             _, actual = await self.target_after_mount(grant)
-            result["mounted"] = True
-            result["status"] = "success"
-            result["message"] = "重新挂载完成；这不代表文件系统已修复，请检查刷新后的挂载状态和日志"
+            result["afterMount"] = self.observation(actual)
             actual_options = mount_options(actual, readonly)
             actual_readonly = actual["readOnly"] or any(m["readOnly"] for m in actual["mounts"])
             if (readonly and not actual_readonly) or not set(options).issubset(actual_options):
                 raise ReadFailure("verification_failed", "挂载已完成但未确认只读、权限或安全选项保持一致，请停止使用设备并核对系统状态")
+            result["mounted"] = True
+            result["status"] = "success"
+            result["message"] = "已验证挂载 → 卸载 → 重新挂载；不依赖内核日志，也不代表文件系统已修复"
             if actual_readonly and not readonly:
                 result["warnings"].append("挂载已完成，但当前为只读；请核对最新日志，不要继续写入")
         except (ReadFailure, OSError, ValueError, KeyError, TypeError) as exc:

@@ -6,7 +6,7 @@ import json
 import os
 import re
 import secrets
-from .suspend import marker, ordered, micros
+from .suspend import marker, ordered, micros, cycle_timeline
 
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 REPORT_WINDOWS = {"boot": "本次开机", "day": "最近24小时", "week": "最近7天", "all": "全部可用记录（有界尾部）"}
@@ -26,6 +26,15 @@ class Redactor:
                 for mount in part["mounts"]:
                     if mount.get("target"):
                         self.known[mount["target"]] = self.alias("挂载路径", mount["target"])
+
+    def structured(self, value):
+        if isinstance(value, str):
+            return self.text(value)
+        if isinstance(value, list):
+            return [self.structured(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self.structured(v) for k, v in value.items()}
+        return value
 
     def alias(self, kind, value):
         return f"[{kind}-{hashlib.sha256(self.salt + value.encode()).hexdigest()[:8]}]"
@@ -122,6 +131,23 @@ def build_report(snapshot, capture, hardware, generated_at=None, private_values=
     for cycle in cycles[-100:]:
         lines.append(f"Boot={cycle['bootId']} Cycle={cycle['id']} {cycle['status']} 开始={iso(cycle['start']['timestamp'] if cycle['start'] else None)} 唤醒完成={iso(cycle['wake']['timestamp'] if cycle['wake'] else None)} 来源={cycle['completion'] or '缺失'}")
         lines.extend("  " + note for note in cycle["notes"])
+    audit = capture.get("audit", {"status": "unavailable", "message": "独立审计未提供", "operations": [], "limited": False})
+    lines.extend(["", "=== 重新挂载独立操作审计（按所选范围；不依赖内核日志） ===",
+                  redactor.text(audit.get("message", audit["status"])),
+                  "审计状态: " + audit["status"] + ("；历史已截断" if audit.get("limited") else ""),
+                  "命令 returned_zero 仅表示返回码0；success 还要求验证挂载→无挂载→重新挂载及身份/选项。running 是中断或未完成，不是成功。"])
+    for operation in audit["operations"]:
+        safe = redactor.structured(operation)
+        safe["bootId"] = operation.get("bootId")
+        safe["operationId"] = operation.get("operationId")
+        lines.append(json.dumps(safe, ensure_ascii=False))
+    event_map = {e["id"]: e for e in snapshot["events"]}
+    lines.extend(["", "=== 各周期事件时间线（前5分钟 / 进入期间 / 后10分钟；仅已返回事件） ==="])
+    for cycle in cycles[-100:]:
+        lines.append(f"Boot={cycle['bootId']} Cycle={cycle['id']}；日志边界和时间关系均为估计，不代表因果")
+        for item in cycle_timeline(cycle, cycles, snapshot["events"]):
+            message = item.get("message", "") if item["source"] == "sleep" else event_map[item["eventId"]]["raw"]
+            lines.append(f"  {iso(item['timestamp'])} monoUs={item['monotonicUs']} {item['phase']} {item['kind']} | {redactor.text(message)}")
     lines.extend(["", "=== 分类事件与唤醒时间关系 ==="])
     for event in snapshot["events"][::-1]:
         lines.append(f"{iso(event['timestamp'])} Boot={event['bootId'] or '未知'} {event['severity']} {event['kind']} 设备={event['deviceId'] or '未关联'} 引用={','.join(event['references'])} | {wake_description(event['wakeContext'])} | {redactor.text(event['summary'])}")
@@ -156,6 +182,6 @@ def build_report(snapshot, capture, hardware, generated_at=None, private_values=
     banner = f"报告截断: {'是' if truncated else '未触及本次读取/报告大小上限（不保证历史完整）'}；原始相关记录保留 {len(kept)}/{len(raw)}，上限2MiB。"
     text = banner + "\n" + prefix + "\n\n=== 完整原始诊断消息（脱敏 JSONL 子集，非分类摘要） ===\n" + "\n".join(kept) + "\n"
     summary = "\n".join(["External Storage Guard 简短诊断摘要", f"生成时间 (UTC): {iso(generated_at)}", *lines[4:7], banner,
-                          f"日志状态: {snapshot['journalStatus']['status']}", "完整原始日志请复制完整报告或导出 TXT。", "\n".join(limits)])
+                          f"日志状态: {snapshot['journalStatus']['status']}；独立操作审计: {audit['status']}（{len(audit['operations'])} 项）", "完整原始日志请复制完整报告或导出 TXT。", "\n".join(limits)])
     return {"text": text, "summary": summary, "generatedAt": generated_at, "truncated": bool(truncated),
             "size": len(text.encode("utf-8")), "rawCount": len(kept), "availableRawCount": len(raw)}

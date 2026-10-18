@@ -102,7 +102,7 @@ export function App() {
     <OperationStatus operation={operation} busy={managing} />
     {data && <>
       <Status data={data} />
-      {data.sleepHistory && <SleepHistory history={data.sleepHistory} selected={sleepCycle} onSelect={setSleepCycle} minutes={wakeMinutes} onMinutes={setWakeMinutes} />}
+      {data.sleepHistory && <SleepHistory events={data.events} history={data.sleepHistory} selected={sleepCycle} onSelect={setSleepCycle} minutes={wakeMinutes} onMinutes={setWakeMinutes} />}
       {selected ? <>
         <PanelSection><PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => setSelected(null)}>{zh.back}</ButtonItem></PanelSectionRow></PanelSection>
         {device ? <DeviceDetail device={device} readable={data.journalStatus.status === "ok"} busy={busy} onRemount={token => void remount(token)} /> :

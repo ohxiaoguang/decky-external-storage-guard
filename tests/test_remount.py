@@ -192,7 +192,7 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
         command.assert_not_called()
         self.setUp()
         result, command = await self.execute(scans=[self.device, self.device, None])
-        self.assertTrue(result["unmounted"])
+        self.assertIsNone(result["unmounted"])  # Exit 0, but no observation of absence after disconnect.
         self.assertEqual(command.call_count, 1)
 
     async def test_busy_permission_unmount_failure_stop_without_mount(self):

@@ -37,11 +37,11 @@ export const zh = {
   noRepair: "重新挂载不能代替文件系统检查或修复；本插件不会运行 fsck。",
   managing: "正在安全卸载并重新挂载，请勿拔出设备或卸载插件…",
   operation: "设备操作结果", operationSuccess: "成功", operationFailure: "未完成",
-  phase: "阶段", phases: { validation: "操作对象校验", unmount: "安全卸载", mount: "重新挂载", verify: "挂载状态确认" } as Record<string, string>,
+  phase: "阶段", phases: { verify_unmount: "验证卸载状态", validation: "操作对象校验", unmount: "安全卸载", mount: "重新挂载", verify: "挂载状态确认" } as Record<string, string>,
   manageUnavailable: "该分区仅支持监控，请刷新查看操作资格。",
   communicationUnknown: "设备操作通信中断，结果尚未确认。后端可能仍在执行，请等待后刷新核对真实状态，不要立即重复操作。",
   eventKinds: {
-    cache_flush: "缓存刷新失败", io_error: "读写失败", filesystem: "文件系统错误",
+    cache_flush: "缓存刷新失败", cache_enable: "MMC 缓存启用失败", runtime_suspend: "MMC 运行时挂起失败", runtime_resume: "MMC 运行时恢复失败", io_error: "读写失败", filesystem: "文件系统错误",
     readonly: "异常只读", offline: "设备离线", disconnect: "设备断开", initialization: "初始化失败",
     tuning: "调谐回退", timeout: "响应超时", reset: "重试或重置", crc: "传输校验",
     controller: "控制器异常", mount: "挂载变化", recognized: "设备识别",

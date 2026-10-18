@@ -186,6 +186,44 @@ def annotate(events, cycles):
             "_SOURCE_MONOTONIC_TIMESTAMP": event.get("sourceMonotonicUs")}, cycles)
 
 
+def cycle_timeline(cycle, cycles, events):
+    """All available classified events in bounded context, plus every PM marker.
+
+    Before context is five minutes; after context is ten. A storage event can be
+    both after one wake and before the next suspend. Never infer causality.
+    Storage rows reference the shared events array so raw messages are not copied.
+    """
+    rows = [{**point(r), "source": "sleep", "message": r["MESSAGE"], "kind": marker(r),
+             "phase": "boundary", "estimated": True} for r in cycle["records"]]
+    for event in events:
+        if event.get("bootId") != cycle["bootId"]:
+            continue
+        row = {"_BOOT_ID": event["bootId"], "__REALTIME_TIMESTAMP": event.get("realtimeUs"),
+               "__MONOTONIC_TIMESTAMP": event.get("monotonicUs"), "_SOURCE_MONOTONIC_TIMESTAMP": event.get("sourceMonotonicUs")}
+        context = event.get("wakeContext") or relation(row, cycles)
+        phase = None
+        if context["cycleId"] == cycle["id"]:
+            if context["phase"] == "during_unknown":
+                phase = "during_unknown"
+            elif context["phase"] == "after_wake" and context["delaySeconds"] <= 600:
+                phase = "after_wake"
+        start = cycle["start"]
+        if start:
+            key = "monotonicUs" if mono(row) is not None and start["monotonicUs"] is not None else "realtimeUs"
+            value = mono(row) if key == "monotonicUs" else realtime(row)
+            anchor = start[key]
+            next_starts = [c for c in cycles if c["bootId"] == cycle["bootId"] and c["start"] and
+                           c["start"][key] is not None and value is not None and value < c["start"][key]]
+            nearest = min(next_starts, key=lambda c: c["start"][key], default=None)
+            if value is not None and anchor is not None and 0 < anchor - value <= 300_000_000 and nearest and nearest["id"] == cycle["id"] and context["phase"] != "during_unknown":
+                phase = "before_suspend"
+        if phase:
+            rows.append({**point(row), "source": "storage", "eventId": event["id"], "phase": phase,
+                         "kind": event["kind"], "estimated": True})
+    use_mono = all(r["monotonicUs"] is not None for r in rows)
+    return sorted(rows, key=lambda r: (r["monotonicUs"] if use_mono else r["realtimeUs"]) or 0)
+
+
 def history_payload(cycles, events, journal_status):
     limited = len(cycles) > MAX_CYCLES
     selected = cycles[-MAX_CYCLES:][::-1]
@@ -193,6 +231,7 @@ def history_payload(cycles, events, journal_status):
     for cycle in selected:
         entry = {k: v for k, v in cycle.items() if k != "records"}
         entry["records"] = [{**point(r), "message": r["MESSAGE"][:1024], "kind": marker(r)} for r in cycle["records"][-8:]]
+        entry["timeline"] = cycle_timeline(cycle, cycles, events)
         entry["traceLimited"] = len(cycle["records"]) > 8 or any(len(r["MESSAGE"]) > 1024 for r in cycle["records"])
         after = [e for e in events if e["wakeContext"]["cycleId"] == cycle["id"] and e["wakeContext"]["phase"] == "after_wake"]
         entry["afterCounts"] = {str(minutes): sum(e["severity"] != "Info" and e["wakeContext"]["delaySeconds"] <= minutes * 60 for e in after) for minutes in (1, 5, 10)}

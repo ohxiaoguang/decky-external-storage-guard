@@ -8,7 +8,7 @@ from .devices import scan
 from .journal import read_journal, WINDOWS
 from .events import analyze
 from .remount import Remounter
-from .operation_store import OperationStore
+from .operation_store import OperationStore, AuditStore
 from .suspend import pair_cycles, annotate, history_payload
 from .hardware import system_info, enrich_readers, private_identifiers
 from .report import build_report, REPORT_WINDOWS
@@ -30,6 +30,7 @@ class Service:
         self.managing = False
         self.remounter = Remounter()
         self.operation_store = OperationStore()
+        self.audit_store = AuditStore()
         self.last_operation = self.operation_store.load()
         self.reports = {}
 
@@ -49,6 +50,13 @@ class Service:
         capture = {}
         snapshot = await self._snapshot(window, capture=capture, management=False)
         await enrich_readers(snapshot["devices"])
+        audit = self.audit_store.load()
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+        cutoff = now_ms - {"day": 86400000, "week": 604800000}.get(window, now_ms)
+        audit["operations"] = [op for op in audit["operations"] if
+            (window != "boot" or op.get("bootId") == boot_id()) and
+            (window not in ("day", "week") or isinstance(op.get("startedAt"), (float, int)) and op["startedAt"] >= cutoff)]
+        capture["audit"] = audit
         report = build_report(snapshot, capture, system_info(), private_values=private_identifiers(snapshot["devices"]))
         now = time.monotonic()
         self.reports = {key: value for key, value in self.reports.items() if value["expires"] > now}
@@ -106,6 +114,14 @@ class Service:
                 if required:
                     raise ReadFailure("state_write_failed", "无法记录操作状态，尚未卸载，已拒绝执行") from exc
                 value["warnings"].append("操作记录写入失败；若插件被中断，请以真实挂载状态为准")
+            try:
+                self.audit_store.record(self.last_operation)
+            except OSError as exc:
+                if required:
+                    raise ReadFailure("audit_write_failed", "无法持久记录独立操作审计，尚未卸载，已拒绝执行") from exc
+                warning = "独立审计写入失败；请核对真实挂载状态"
+                if warning not in value["warnings"]:
+                    value["warnings"].append(warning)
         operation = await self.remounter.execute(token, boot_id(), progress)
         operation["finishedAt"] = datetime.now(timezone.utc).timestamp() * 1000
         self.last_operation = operation
@@ -113,6 +129,10 @@ class Service:
             self.operation_store.save(operation)
         except OSError:
             operation["warnings"].append("最终操作记录未能写入；当前会话仍保留结果，请核对真实状态")
+        try:
+            self.audit_store.record(operation)
+        except OSError:
+            operation["warnings"].append("最终独立操作审计未能写入；当前结果仅在本次会话可见")
         # Refresh real device state and current-boot logs on *all* outcomes,
         # including command failures/timeouts. Never synthesize a mounted state.
         snapshot = await self._snapshot("boot")
