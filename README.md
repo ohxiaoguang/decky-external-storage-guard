@@ -1,6 +1,6 @@
-# External Storage Guard v0.2.0
+# External Storage Guard v0.3.0
 
-SteamOS 游戏模式中的外部存储诊断 Decky 插件。适用于 Steam Deck、安装 SteamOS 的 ROG Ally X 等设备；界面为中文。v0.2.0 在现有监控功能上增加需用户确认的安全重新挂载。
+SteamOS 游戏模式中的外部存储诊断 Decky 插件。适用于 Steam Deck、安装 SteamOS 的 ROG Ally X 等设备；界面为中文。v0.3.0 新增休眠与唤醒诊断、诊断报告复制和 TXT 导出，保留监控及需用户确认的安全重新挂载。
 
 本项目实现了实际系统读取，没有内置演示数据、HTTP 服务或额外监听端口。**构建和自动化测试通过不等于已经通过实机验收**；ROG Ally X / Steam Deck 的 Decky 加载、手柄操作、真实读卡器与 USB 桥接兼容性仍需按下文验证。
 
@@ -9,7 +9,7 @@ SteamOS 游戏模式中的外部存储诊断 Decky 插件。适用于 Steam Deck
 - 自动列出可确认的原生 SD 卡、USB HDD / SSD 及分区，包括未挂载设备；显示容量、文件系统、所有可见挂载点与只读状态。
 - 使用 `lsblk --json`、sysfs 拓扑和 `findmnt --json`；不凭 `sda`、`mmcblk0` 名称或单个 removable 标志判断。原生 SD 需要 sysfs `device/type=SD` 和 MMC host 拓扑；eMMC (`MMC`) 排除。USB 通过传输类型或 sysfs USB 拓扑确认。
 - 排除内置 NVMe，以及承载 `/`、`/usr`、`/var`、`/home`、`/boot`、`/efi` 的磁盘（包括映射设备的父盘）。无法确认外置属性的磁盘不列出；已确认 USB 但无法判别 HDD / SSD 时显示“未知”。USB 的 HDD / SSD 分类依赖内核 ROTA 提示，不能保证识别硬盘盒内真实介质。
-- 读取本次启动、最近 24 小时、上次启动的内核日志。最近 24 小时使用 `journalctl _TRANSPORT=kernel --since=-24h`，这是 `-k` 的内核过滤条件，但不隐含限制为本次启动。
+- 读取本次启动、最近 24 小时、最近 7 天、全部可用记录或上次启动的内核日志与限定的 systemd 休眠服务日志。使用 journalctl JSON 和结构化时间戳；历史范围不使用会隐含限制本次启动的 `-k`。诊断报告提供本次启动 / 24 小时 / 7 天 / 全部四种范围。
 - 分类 MMC 调谐 / CRC / 初始化 / 缓存刷新、I/O、USB 重置 / 断开、SCSI / UAS、ext4 / exFAT / NTFS、实际只读重挂载等事件。按设备和严重程度筛选，时间倒序，点击查看原始日志；时间按设备本地时区显示。
 - 严重：读写失败、缓存刷新失败、文件系统错误、内核拒绝离线设备 I/O、因错误切换只读。警告：调谐回退、重试 / 重置、CRC、超时；超时不自动宣称已恢复。信息：识别、正常挂载 / 卸载、USB 断开。
 - **一条 `USB disconnect` 不能判断用户是否主动拔出，因此单独按信息展示；伴随的真实 I/O / offline 错误仍按严重展示。** 只读挂载也不自动当作故障。`errors=remount-ro` 是挂载策略；重复 Tuning failed 记录次数但不认定卡损坏；游戏 segfault 排除。
@@ -23,6 +23,36 @@ SteamOS 游戏模式中的外部存储诊断 Decky 插件。适用于 Steam Deck
 **上次启动的记录不使用本次启动的设备名对应关系**，最近 24 小时也逐条检查 boot ID；历史存储异常通常列入未关联事件。对本次启动已观察到的重新 attach / disconnect 边界，较早世代的记录也不计入当前设备。这不是跨重启持久设备身份追踪；当前日志尾部缺失身份变更证据时，内核设备名仍存在复用风险。没有可确认外置身份的历史 NVMe 错误被排除。
 
 没有异常记录不等于设备健康。计数仅针对当前时间范围内**返回的最近记录**，不是磁盘寿命计数或完整健康评估。
+
+## 休眠与唤醒诊断（v0.3.0）
+
+“休眠历史”按最近周期优先显示。识别内核 `PM: suspend entry`、`Freezing user space processes`、`PM: suspend exit`，并结合 systemd-suspend 等服务的结构化消息 ID 和日志进行配对。每次周期保留 Boot ID、开始 / 唤醒时间及原始依据。最多展示最近 100 个周期，每页 10 个；展开保留最近 8 条、每条最多 1024 字符的依据，完整的有界诊断消息可通过报告查看。
+
+选择某次唤醒与 **1 / 5 / 10 分钟**，筛选该周期唤醒后的存储事件；错误 / 警告计数基于当前返回的最多 500 条分类事件。识别、读卡器初始化、USB 断连 / 重置及正常挂载信号另行计数。日志详情显示“唤醒后约 38 秒”等信息，区分休眠前、休眠期间无法确定、唤醒后及未知事件；同一事件可以既在上次唤醒后，又在下一次休眠前。仅在日志提供证据时显示设备重新识别、断开、重置或重新挂载，未出现不代表未发生。
+
+每个 Boot ID 独立配对，绝不跨启动计算时间差。优先使用内核源单调时间戳，否则使用 journal 单调时间戳；缺失时才退回实时时钟并标为估计。**单调时钟通常不包含挂起时长，不能用其差值宣称实际休眠了多久。** 日历时间只代表日志时间；内核缓冲、日志接收延迟、校时和完成记录缺失均可能影响边界。内核退出不等同于用户空间完全恢复，只有内核退出记录时明确标记；无法配对或确定时间时保留缺失 / 未知状态，不补造记录。未捕获开始的唤醒仍会显示为不完整周期。
+
+**时间相关不等于因果关系。** 唤醒后出现 SD / USB 错误不证明休眠导致故障。旧日志不足、无权限、没有休眠记录、读取截断均有独立提示；无异常不能作为健康证明。此区域只读，不会自动休眠、唤醒、重新挂载或重置设备。
+
+## 复制诊断报告与导出 TXT（v0.3.0）
+
+主界面“诊断报告”选择时间范围（默认本次启动），再点击 **复制诊断报告**、**复制简短摘要** 或 **导出 TXT 文件**。报告包含简短摘要、生成时间（UTC）、内核与可可靠识别的设备型号、当前外置盘和分区 / 挂载信息、原生 SD 读卡器 PCI ID / 驱动、可验证的读卡器名称、休眠周期、异常及相对唤醒时间、诊断限制，以及 **带 Boot ID 和原始微秒时间戳的脱敏原始 JSONL 消息**。不会只导出分类摘要；尚未命中分类规则的相关存储消息也保留，便于复核解析规则。
+
+当前设备快照不代表历史设备身份。跨启动的异常、归属不确定的控制器 / USB / 分区事件保持“未关联”。原生 MMC 读卡器从 sysfs 确认 PCI 功能和驱动；可选 `lspci` 仅在地址与 PCI ID 都一致时补充型号名称，缺少工具、USB 读卡器或无法可靠识别时显示未知，不猜测芯片。
+
+报告只选取外部存储相关内核消息和休眠依据，不收集整个系统 journal、游戏崩溃、无关 USB 外设或内置 SSD 日志。原始消息保留诊断内容与结构化时钟，但经过脱敏，**不是逐字节原始 journal 备份**。默认隐藏序列号、CID / WWN、UUID / PARTUUID、用户名、挂载路径、网络地址、URL 及常见密码 / 令牌字段；每份报告使用独立匿名代号。保留诊断所需的 `/dev/...`、本地 USB 端口、PCI 标识、设备型号和 Boot ID。隐藏项可能连同相邻文字一起被保守遮盖；规则不能保证识别所有私人信息，分享前仍应检查 TXT。没有关闭脱敏的选项，也不附带进程命令行、主机名或无关 journal 元数据。
+
+复制通过官方 `@decky/api.executeInTab` 在 Loader 支持的 Steam CEF 页面执行受控的复制适配，并检查 CEF `execCommand('copy')` 返回值；日志内容以 JSON 数据编码，不能作为脚本执行。没有假定游戏模式支持 `navigator.clipboard`，也没有调用未经验证的 Steam 私有文本接口。Decky 当前公开 API 没有独立文本剪贴板方法，此适配依赖实际 CEF / Decky 版本：失败会明确提示改用 TXT；自动化检查不代替掌机验证。完整报告超过 **64 KiB（UTF-8）** 会拒绝复制并建议导出，绝不静默只复制一部分。简短摘要可单独复制。
+
+TXT 保存到 Decky 确认的桌面用户目录：
+
+```text
+<桌面用户主目录>/Downloads/External-Storage-Guard/External-Storage-Guard-<UTC时间>-<随机值>.txt
+```
+
+界面显示实际保存路径。目录缺失时创建私有目录，文件 UTF-8、权限 `0600`，属于桌面用户；拒绝目录符号链接、覆盖已有文件、身份 / 目录所有者不符。不能确认 `DECKY_USER` 或桌面用户目录时明确失败，不回退 root 目录或外部盘。后端只接受已生成的脱敏报告编号，不接受前端任意路径或文本；最多缓存 2 份、有效 10 分钟，前端同范围最多复用 1 分钟。导出是用户明确请求的文件写入，不进行设备状态操作。
+
+“全部可用记录”仍受读取和报告限制：普通范围最多最近 **6000** 条、7 天 / 全部最多 **12000** 条限定 journal 记录，stdout 上限 **8 MiB**、每条消息最多 **4096** 字符；报告上限 **2 MiB**（摘要部分最多 256 KiB），达到上限保留最近原始消息并明确报告截断和保留数量。跨启动顺序尽可能按实时时钟排列，同启动内优先单调时钟；系统时钟跳变时，跨启动先后不能保证精确。非持久 journal 可能只有当前启动；报告会提示历史可能缺失，不声称已覆盖整个选择时段。查询失败 / 权限不足时仍可给出已有设备快照和限制，不能把缺少日志解释为没有错误。
 
 ## 安全重新挂载（v0.2.0）
 
@@ -48,15 +78,15 @@ SteamOS 游戏模式中的外部存储诊断 Decky 插件。适用于 Steam Deck
 
 ## 安全、权限与性能
 
-监控只调用固定参数的 `lsblk`、`findmnt`、`journalctl` 并读取 sysfs / boot ID；只有用户在确认弹窗确认后，设备管理 API 才会调用上述两种 `udisksctl` 操作。没有 shell 拼接、全局权限策略变更、`umount -l/-f` 或额外 HTTP 服务。
+监控与报告只调用固定参数的 `lsblk`、`findmnt`、`journalctl`，报告可选查询 `lspci`，并读取 sysfs / boot ID / 有限系统型号信息；只有用户在确认弹窗确认后，设备管理 API 才会调用上述两种 `udisksctl` 操作。没有 shell 拼接、全局权限策略变更、`umount -l/-f` 或额外 HTTP 服务。
 
 `plugin.json` 沿用 Decky 支持的 `root` 标志，使用 Decky 已有进程身份，让 UDisks / polkit 自行执行授权检查。`--no-user-interaction` 禁止弹出认证提示；授权不足、缺少 UDisks / `udisksctl` 或系统总线不可用时报告原因，不调用 sudo / pkexec、不改变用户组或 polkit 规则、不绕过认证。root 标志不保证所有 SteamOS / UDisks 配置都授权成功。
 
 只在打开界面、手动刷新和确认操作后读取；没有后台轮询。普通读取在卸载时取消，正在执行的已确认事务尝试完成后退出，但 Decky 仍可能在其终止期限到达后强制停止，以上操作记录用于下次识别中断。
 
-读取命令各有 8 秒超时，本次启动刷新最多三条命令；历史范围会额外读取本次启动日志以展示当前故障警告。UDisks 每步最多等待 20 秒且不重试，多次安全复核和最终刷新使单次操作最坏可能超过两分钟，通常快得多；前端异步等待，不阻塞游戏 UI。命令超时也不证明 UDisks 系统服务绝对没有完成操作，因此按结果未确认提示，以真实刷新状态为准。
+设备读取命令各有 8 秒超时，journal 查询为 12 秒，可选读卡器名称查询每个 2 秒、最多 8 个控制器；本次启动刷新最多三条核心命令；历史范围会额外读取本次启动日志以展示当前故障警告。UDisks 每步最多等待 20 秒且不重试，多次安全复核和最终刷新使单次操作最坏可能超过两分钟，通常快得多；前端异步等待，不阻塞游戏 UI。命令超时也不证明 UDisks 系统服务绝对没有完成操作，因此按结果未确认提示，以真实刷新状态为准。
 
-监控 stdout 上限 8 MiB、stderr 上限 64 KiB；UDisks 输出上限 64 KiB；最多读取最新 6000 条内核日志，每条消息最多 4096 字符，返回最新 500 条匹配事件，前端每页 20 条。触及限制会提示不完整或报错。读取失败绝不显示为“设备正常”。
+监控 stdout 上限 8 MiB、stderr 上限 64 KiB；UDisks 输出上限 64 KiB；普通范围最多读取最新 6000 条、7 天 / 全部最多 12000 条限定 journal 记录，每条消息最多 4096 字符，返回最新 500 条匹配事件，前端每页 20 条。触及限制会提示不完整或报错。读取失败绝不显示为“设备正常”。
 
 ## 技术结构
 
@@ -69,7 +99,12 @@ storage_guard/devices.py    设备发现、sysfs、挂载状态与系统盘排�
 storage_guard/journal.py    日志读取、时间范围和错误状态
 storage_guard/rules.py      独立分类规则（纯函数）
 storage_guard/events.py     关联、启动隔离、排序与数量限制（纯函数）
-storage_guard/service.py    组合扫描、事件计数与结构化响应
+storage_guard/service.py    组合扫描、事件计数、报告缓存与结构化响应
+storage_guard/suspend.py    Boot 隔离的周期配对、时钟语义及唤醒关联
+storage_guard/report.py     摘要、脱敏、有界原始 JSONL 报告
+storage_guard/hardware.py   只读系统型号与读卡器信息
+storage_guard/export.py     桌面用户 Downloads 的安全 TXT 导出
+src/clipboard.ts            Decky / Steam CEF 复制适配与大小限制
 storage_guard/remount.py    一次性授权、分区资格、实时身份检查、UDisks 事务
 storage_guard/operation_store.py Decky 插件运行目录中的原子操作记录
 src/App.tsx                 按需请求、页面状态、筛选
@@ -132,7 +167,7 @@ external-storage-guard/
 
 [下载最新安装包](https://github.com/ohxiaoguang/decky-external-storage-guard/releases/latest/download/External-Storage-Guard.zip) · [查看所有 Release](https://github.com/ohxiaoguang/decky-external-storage-guard/releases)
 
-固定版本安装地址为 `https://github.com/ohxiaoguang/decky-external-storage-guard/releases/download/v0.2.0/External-Storage-Guard.zip`（替换版本标签可安装其他版本）。直链需要相应 Release 已成功发布并附带安装资产；返回 404 时先检查 Release / Actions 页面。
+固定版本安装地址为 `https://github.com/ohxiaoguang/decky-external-storage-guard/releases/download/v0.3.0/External-Storage-Guard.zip`（替换版本标签可安装其他版本）。直链需要相应 Release 已成功发布并附带安装资产；返回 404 时先检查 Release / Actions 页面。
 
 也可将下载或本地构建的 `External-Storage-Guard.zip` 放入掌机 Downloads，再通过 **Install Plugin from ZIP File / 从 ZIP 文件安装插件** 安装。**不要使用 GitHub 自动生成的 Source code (zip) / Source code (tar.gz)**；源码归档没有编译后的 `dist/index.js`，不能代替插件安装包。
 
@@ -145,9 +180,9 @@ external-storage-guard/
 当前版本的标签命令示例（发布流程必须已提交到该标签所指提交）：
 
 ```bash
-python3 scripts/check_release.py v0.2.0
-git tag -a v0.2.0 -m "External Storage Guard v0.2.0"
-git push origin v0.2.0
+python3 scripts/check_release.py v0.3.0
+git tag -a v0.3.0 -m "External Storage Guard v0.3.0"
+git push origin v0.3.0
 ```
 
 后续发版先用 `npm version <新版本> --no-git-tag-version` 同步 package 与 lockfile 并提交，再推送对应的 `v<新版本>` 标签；不要移动已有发布标签。版本不匹配时查看 Actions 的 **Check tag and package versions** 步骤。
@@ -160,7 +195,7 @@ git push origin v0.2.0
 
 无法使用 Actions 时，手动发布步骤：
 
-1. 检出计划发布的标签，在该提交运行 `npm ci --ignore-scripts`、`python3 scripts/check_release.py v0.2.0` 和 `npm run package`（其他版本替换标签）。全部成功后得到 `out/External-Storage-Guard.zip`。
+1. 检出计划发布的标签，在该提交运行 `npm ci --ignore-scripts`、`python3 scripts/check_release.py v0.3.0` 和 `npm run package`（其他版本替换标签）。全部成功后得到 `out/External-Storage-Guard.zip`。
 2. 在 GitHub 仓库 **Releases → Draft a new release**，选择同一标签，上传上述 ZIP 作为独立 Release 资产，文件名保持 **External-Storage-Guard.zip**。正式版发布并标记为 latest；预发布勾选 prerelease。
 3. 检查 Release 页面存在该资产，打开上面的 `latest/download` 直链并下载验证。不要选择页面自动附带的 Source code ZIP。
 

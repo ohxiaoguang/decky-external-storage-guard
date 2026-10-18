@@ -1,7 +1,8 @@
 """Pure event association. Never assign generic USB errors by proximity in time."""
 import re
-from .rules import classify
+from .rules import classify, Rule
 from .journal import MAX_EVENTS
+from .suspend import ordered, micros
 
 BLOCK = re.compile(r"(?<![\w/-])(?:/dev/)?(mmcblk\d+(?:p\d+)?|sd[a-z]+\d*|nvme\d+n\d+(?:p\d+)?)(?![\w])")
 CONTROLLER = re.compile(r"\bmmc\d+(?=:|\b)")
@@ -16,7 +17,8 @@ def stamp(record):
         return 0
 
 
-def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_id: str) -> tuple[list[dict], bool]:
+def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_id: str,
+            include_context: bool = False, max_events: int = MAX_EVENTS) -> tuple[list[dict], bool]:
     """Snapshot mappings only apply to the current boot; unknown history stays unassociated.
 
     To prevent older block names being assigned to replacement media, aliases
@@ -37,9 +39,9 @@ def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_
             scsi.setdefault(d["scsiAddress"], []).append(d["id"])
     # A block name or USB port can be reused within one boot. Do not attribute older
     # generations to today's device. Last disconnect is a boundary for snapshot data.
-    ordered = sorted(records, key=stamp)
+    rows = ordered(records)
     boundaries = {}
-    for index, record in enumerate(ordered):
+    for index, record in enumerate(rows):
         if record.get("_BOOT_ID") != boot_id:
             continue
         msg = record.get("MESSAGE", "")
@@ -59,8 +61,10 @@ def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_
     events = []
     historical_ports = set()
     previous_boot = None
-    for index, record in enumerate(ordered):
+    for index, record in enumerate(rows):
         msg = record.get("MESSAGE", "")
+        if include_context and "segfault" in msg.lower():
+            continue
         if record.get("_BOOT_ID") != previous_boot:
             historical_ports.clear()
             previous_boot = record.get("_BOOT_ID")
@@ -72,7 +76,7 @@ def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_
         port = PORT.search(msg)
         if port and re.search(r"\b(?:uas|mass storage|usb-storage)\b", msg, re.I):
             historical_ports.add(port[1])
-        rule = classify(msg)
+        rule = classify(msg) or (Rule("context", "Info", "存储原始上下文", "") if include_context else None)
         if not rule:
             continue
         names = set(BLOCK.findall(msg))
@@ -80,6 +84,8 @@ def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_
         # Never show known internal/other block devices in external statistics.
         controller = CONTROLLER.search(msg)
         if current and (names.intersection(excluded) or (controller and controller[0] in excluded)):
+            continue
+        if current and any("pci:" + address in excluded for address in re.findall(r"\b[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]\b", msg, re.I)):
             continue
         if any(n.startswith("nvme") for n in names) and not (current and names.intersection(aliases)):
             continue
@@ -93,13 +99,17 @@ def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_
                 candidates.update(ports.get(port[1], []))
             if address:
                 candidates.update(scsi.get(address[1], []))
+            for d in devices:
+                reader = d.get("reader") or {}
+                if reader.get("pciAddress") and re.search(r"(?<![\w:])" + re.escape(reader["pciAddress"]) + r"(?![\w.])", msg):
+                    candidates.add(d["id"])
         # Ambiguity or records before the latest identity boundary must remain unassigned.
         owner = next(iter(candidates)) if len(candidates) == 1 else None
         if owner and index < boundaries.get(owner, -1):
             owner = None
         # Unknown USB traffic could be a mouse/controller. Require known storage
         # topology; standalone USB bus failures are deliberately excluded.
-        storage_scope = bool(names or controller or address or "uas" in msg.lower())
+        storage_scope = bool(names or controller or address or re.search(r"\b(?:uas|sdhci(?:[-_]\w+)?|usb-storage)\b", msg, re.I))
         valid_snapshot_port = any(index >= boundaries.get(candidate, -1) for candidate in candidates)
         known_historical_port = bool(port and port[1] in historical_ports)
         if port and "usb disconnect" in msg.lower():
@@ -115,6 +125,10 @@ def analyze(records: list[dict], devices: list[dict], excluded: list[str], boot_
             "references": sorted(names | ({controller[0]} if controller else set()) | ({port[1]} if port else set())),
             "bootId": record.get("_BOOT_ID"), "kind": rule.kind,
             "severity": rule.severity, "summary": rule.summary, "raw": msg,
+            "realtimeUs": micros(record.get("__REALTIME_TIMESTAMP")),
+            "monotonicUs": micros(record.get("__MONOTONIC_TIMESTAMP")),
+            "sourceMonotonicUs": micros(record.get("_SOURCE_MONOTONIC_TIMESTAMP")),
+            **({"record": record} if include_context else {}),
         })
     events.reverse()
-    return events[:MAX_EVENTS], len(events) > MAX_EVENTS
+    return events[:max_events], len(events) > max_events

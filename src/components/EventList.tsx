@@ -15,6 +15,12 @@ export function EventList({ events }: { events: StorageEvent[] }) {
         description={<div style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
           <div>{time(e.timestamp)} · {e.deviceLabel || zh.unassociated}</div>
           <div>{zh.kind}：{zh.eventKinds[e.kind] || e.kind} · {zh.refs}：{e.references.join(", ") || zh.unavailable}</div>
+          {e.wakeContext && <div>
+            {e.wakeContext.phase === "after_wake" ? `${zh.afterWake}${e.wakeContext.estimated ? zh.estimated : ""} ${Math.round(e.wakeContext.delaySeconds || 0)} ${zh.seconds}` :
+              e.wakeContext.phase === "before_suspend" ? zh.beforeSleep : e.wakeContext.phase === "during_unknown" ? zh.duringSleep : zh.wakeUnknown}
+            {e.wakeContext.clockAdjusted && ` · ${zh.clockAdjusted}`}
+            {e.wakeContext.beforeNextSuspend && ` · ${zh.beforeNextSleep}`}
+          </div>}
           {expanded === e.id ? <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{e.raw}</pre> : zh.raw}
         </div>}>
         <span style={{ color: e.severity === "Error" ? "#ff9a9a" : e.severity === "Warning" ? "#ffce70" : undefined }}>

@@ -8,6 +8,7 @@ if plugin_path not in sys.path:
     sys.path.insert(0, plugin_path)
 
 from storage_guard.service import Service
+from storage_guard.commands import ReadFailure
 
 
 class Plugin:
@@ -19,6 +20,20 @@ class Plugin:
 
     async def remount_partition(self, token: str) -> dict:
         return await self.service.remount(token)
+
+    async def get_report(self, window: str = "boot") -> dict:
+        try:
+            return await self.service.generate_report(window)
+        except ReadFailure as exc:
+            return {"status": exc.status, "message": exc.message}
+        except (OSError, ValueError, TypeError) as exc:
+            return {"status": "report_failed", "message": f"报告生成失败：{type(exc).__name__}"}
+
+    async def export_report(self, report_id: str) -> dict:
+        try:
+            return await self.service.export_report(report_id)
+        except ReadFailure as exc:
+            return {"status": exc.status, "message": exc.message}
 
     async def _main(self):
         pass
