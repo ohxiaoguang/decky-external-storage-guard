@@ -1,4 +1,4 @@
-"""Test harness: simulate Decky's non-root startup, never alter plugin credentials."""
+"""Test harness: verify imports and unchanged process credentials; no storage operations."""
 import os
 from pathlib import Path
 import pwd
@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 WORKER = r'''
-import asyncio, json, os, sys
+import asyncio, errno, json, os, sys
 from unittest.mock import AsyncMock, patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, sys.argv[1])
@@ -14,8 +14,16 @@ from main import Plugin
 from storage_guard.commands import current_user, run, ReadFailure
 async def check():
     user = current_user()
-    assert user.pw_uid == os.getuid() != 0
-    assert user.pw_gid == os.getgid() != 0
+    assert user.pw_uid > 0 and user.pw_gid > 0
+    assert os.getuid() in (0, user.pw_uid)
+    assert not os.isatty(0), 'backend smoke must run without a controlling input terminal'
+    try:
+        fd = os.open('/dev/tty', os.O_RDONLY | os.O_NOCTTY)
+    except OSError as error:
+        assert error.errno in (errno.ENXIO, errno.ENODEV, errno.ENOENT), error
+    else:
+        os.close(fd)
+        raise AssertionError('unexpected controlling terminal')
     before = [list(os.getresuid()), list(os.getresgid()), os.getgroups(), os.environ['HOME']]
     output = await run([sys.executable, '-c', 'import os,json; print(json.dumps([list(os.getresuid()),list(os.getresgid()),os.getgroups(),os.environ["HOME"]]))'])
     assert output.code == 0, output.stderr
@@ -32,19 +40,18 @@ async def check():
     await plugin._unload()
     await plugin._uninstall()
 asyncio.run(check())
-print('Non-root backend and inherited subprocess credentials: OK')
+print('Backend runtime and unchanged subprocess credentials: OK')
 '''
 
 
 def check(plugin):
     account = pwd.getpwnam("nobody") if os.geteuid() == 0 else pwd.getpwuid(os.getuid())
-    # This launch is test-only, equivalent to Loader dropping UID/GID. Preserve
-    # actual inherited supplementary groups instead of assuming a login session.
-    options = {"user": account.pw_uid, "group": account.pw_gid} if os.geteuid() == 0 else {}
+    # No credential switching or fake polkit. Exercise the actual test process;
+    # real UDisks authorization remains a SteamOS device verification step.
     env = {**os.environ, "DECKY_USER": account.pw_name, "DECKY_USER_HOME": account.pw_dir,
-           "HOME": account.pw_dir, "USER": account.pw_name, "DECKY_PLUGIN_RUNTIME_DIR": "/nonexistent/guard-test-runtime"}
-    subprocess.run([sys.executable, "-I", "-c", WORKER, str(Path(plugin).resolve())], env=env,
-                   cwd="/", check=True, timeout=10, **options)
+           "HOME": pwd.getpwuid(os.getuid()).pw_dir, "USER": pwd.getpwuid(os.getuid()).pw_name, "DECKY_PLUGIN_RUNTIME_DIR": "/nonexistent/guard-test-runtime"}
+    subprocess.run([sys.executable, "-I", "-c", WORKER, str(Path(plugin).resolve())], env=env, stdin=subprocess.DEVNULL,
+                   cwd="/", start_new_session=True, check=True, timeout=10)
 
 
 if __name__ == "__main__":

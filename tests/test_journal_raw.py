@@ -18,14 +18,19 @@ def row(message, stamp=1, kernel=True, **extra):
 
 class JournalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        role = patch("storage_guard.journal.os.geteuid", return_value=0)
+        role.start(); self.addCleanup(role.stop)
         zone = patch.dict(os.environ, {"TZ": "UTC"})
         zone.start(); time.tzset()
         self.addCleanup(time.tzset)
         self.addCleanup(zone.stop)
 
     async def read(self, records, stderr=""):
-        output = Output(0, "\n".join(json.dumps(r) for r in records), stderr)
-        with patch("storage_guard.journal.run", AsyncMock(return_value=output)) as command:
+        def response(argv, **kwargs):
+            selected = [r for r in records if (r.get("_TRANSPORT") == "kernel") == ("_TRANSPORT=kernel" in argv)]
+            if "_TRANSPORT=kernel" not in argv and len(argv) < 10: selected = records
+            return Output(0, "\n".join(json.dumps(r) for r in selected), stderr)
+        with patch("storage_guard.journal.run", AsyncMock(side_effect=response)) as command:
             result = await read_journal()
         return result, command
 
@@ -47,14 +52,16 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(field, text)
         self.assertLess(text.index("Finished System Suspend."), text.index("Unmounted /dev/sda1"))
         self.assertNotIn("调谐", text)
-        args = command.call_args.args[0]
+        args = command.call_args_list[0].args[0]
+        service_args = command.call_args_list[1].args[0]
         self.assertIn("_TRANSPORT=kernel", args)
-        self.assertIn("_SYSTEMD_UNIT=udisks2.service", args)
-        self.assertIn("UNIT=systemd-suspend.service", args)
+        self.assertTrue(any(arg.startswith("--grep=") for arg in args))
+        self.assertIn("_SYSTEMD_UNIT=udisks2.service", service_args)
+        self.assertIn("UNIT=systemd-suspend.service", service_args)
         self.assertIn("--boot=0", args)
         self.assertNotIn("-k", args)
         self.assertNotIn("_CMDLINE", " ".join(args))
-        self.assertEqual(command.call_args.kwargs["timeout"], 10)
+        self.assertEqual(command.call_args.kwargs["timeout"], 8)
 
     async def test_unrelated_kernel_not_included_and_message_not_rewritten(self):
         original = "mmc0: path=/run/media/private/Card\nTuning failed; token=raw-text"
@@ -83,7 +90,7 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_permissions_nonzero_invalid_json_and_output_cap(self):
         result, _ = await self.read([])
-        self.assertEqual(result["status"], "no_logs")
+        self.assertIn(result["status"], ("journal_unavailable", "filtered_empty"))
         for output in (Output(0, "", "Permission denied"), Output(1, "", "journal corrupt"), Output(0, "{bad json", "")):
             with patch("storage_guard.journal.run", AsyncMock(return_value=output)), self.assertRaises(ReadFailure):
                 await read_journal()

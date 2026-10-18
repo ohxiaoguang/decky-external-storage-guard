@@ -21,25 +21,46 @@ class Output:
 
 
 def current_user():
-    """Verify the existing non-root process; environment is only a cross-check."""
+    """Validate Decky's desktop account separately from the actual D-Bus caller."""
     try:
+        account = pwd.getpwnam(os.environ.get("DECKY_USER", ""))
+        if (account.pw_name != os.environ.get("DECKY_USER") or account.pw_uid <= 0 or account.pw_gid <= 0 or not Path(account.pw_dir).is_absolute() or
+                account.pw_dir in ("/", "/root") or os.environ.get("DECKY_USER_HOME") != account.pw_dir or
+                pwd.getpwuid(account.pw_uid).pw_name != account.pw_name):
+            raise ValueError("invalid desktop account")
         uid, gid = os.getuid(), os.getgid()
-        if uid <= 0 or gid <= 0 or os.getresuid() != (uid,) * 3 or os.getresgid() != (gid,) * 3:
-            raise ValueError("not an ordinary user process")
-        account = pwd.getpwuid(uid)
-        if (account.pw_uid != uid or account.pw_gid != gid or not Path(account.pw_dir).is_absolute() or account.pw_dir in ("/", "/root") or
-                os.environ.get("DECKY_USER") != account.pw_name or
-                os.environ.get("DECKY_USER_HOME") != account.pw_dir or os.environ.get("HOME") != account.pw_dir):
-            raise ValueError("process does not match Decky host user")
+        if os.getresuid() != (uid,) * 3 or os.getresgid() != (gid,) * 3:
+            raise ValueError("mixed process credentials")
+        if uid == 0:
+            if gid != 0:
+                raise ValueError("unexpected privileged group")
+        elif uid != account.pw_uid or gid != account.pw_gid or os.environ.get("HOME") != account.pw_dir:
+            raise ValueError("process does not match host user")
         return account
     except (KeyError, ValueError, OSError) as exc:
-        raise ReadFailure("permission_denied", "无法确认当前普通用户身份；请确认插件已更新并以非 root 模式重新加载") from exc
+        raise ReadFailure("permission_denied", "无法确认 Decky 用户与后端身份；请重新加载插件") from exc
+
+
+def process_context():
+    return f"UID={os.getuid()}/EUID={os.geteuid()} GID={os.getgid()} groups={','.join(map(str, os.getgroups()))} tty={os.isatty(0)}"
+
+
+async def authorization_context():
+    detail = process_context()
+    try:
+        output = await run(["loginctl", "show-session", "self", "--no-pager", "-p", "Id", "-p", "User", "-p", "Active", "-p", "Seat"], timeout=2, limit=4096)
+        detail += "; logind=" + (output.stdout.strip().replace("\n", ", ") if output.code == 0 else "当前后台进程无可确认的登录会话")
+    except (ReadFailure, OSError):
+        detail += "; logind=不可读取"
+    return detail
 
 
 async def run(argv: list[str], timeout: float = 8, limit: int = 8 * 1024 * 1024) -> Output:
-    user = current_user()
-    # Keep the process's real UID/GID and actual supplementary groups unchanged.
-    env = {"PATH": "/usr/bin:/bin", "HOME": user.pw_dir, "USER": user.pw_name, "LOGNAME": user.pw_name,
+    current_user()
+    caller = pwd.getpwuid(os.getuid())
+    # Credentials are never changed. Mount's explicit as-user is a UDisks option,
+    # not an environment variable or a fake login session.
+    env = {"PATH": "/usr/bin:/bin", "HOME": caller.pw_dir, "USER": caller.pw_name, "LOGNAME": caller.pw_name,
            "LC_ALL": "C", "SYSTEMD_COLORS": "0"}
     try:
         proc = await asyncio.create_subprocess_exec(

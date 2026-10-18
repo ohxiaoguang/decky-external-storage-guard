@@ -1,4 +1,5 @@
 import asyncio
+import json
 from copy import deepcopy
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ from storage_guard.commands import Output, ReadFailure
 from types import SimpleNamespace
 from storage_guard.remount import PartitionManager
 from storage_guard.service import Service
+from storage_guard import udisks
 from test_remount import managed_device, inventory
 
 
@@ -22,14 +24,20 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         patcher = patch("storage_guard.remount.current_user", return_value=self.user)
         patcher.start()
         self.addCleanup(patcher.stop)
+        context = patch("storage_guard.remount.authorization_context", AsyncMock(return_value="UID=1000 tty=False; logind=no session"))
+        context.start(); self.addCleanup(context.stop)
 
     def grant(self, action, device=None):
         self.manager.decorate([device or (self.device if action == "unmount" else self.unmounted)])
         return next(g for g, v in self.manager.grants.items() if v.action == action)
 
-    async def perform(self, action, scans, output=Output(0, "ok", ""), token=None):
+    async def perform(self, action, scans, output=None, token=None):
         token = token or self.grant(action)
-        with patch("storage_guard.remount.scan", AsyncMock(side_effect=[inventory(d) if d else ([], [], []) for d in scans])), patch(
+        if output is None:
+            target = scans[-1]["partitions"][1]["mounts"][0]["target"] if action == "mount" and scans[-1] and scans[-1]["partitions"][1]["mounts"] else "/unused"
+            output = Output(0, json.dumps({"type": "s", "data": [target]}), "")
+        scans = [scans[0], *scans] if scans else scans
+        with patch("storage_guard.remount.udisks.prepare", AsyncMock(return_value=udisks.object_path(self.device["partitions"][1]["name"]))), patch("storage_guard.remount.scan", AsyncMock(side_effect=[inventory(d) if d else ([], [], []) for d in scans])), patch(
             "storage_guard.remount.live_check"), patch("storage_guard.remount.run", AsyncMock(side_effect=output if isinstance(output, Exception) else None, return_value=output)) as command:
             result = await self.manager.execute(action, token)
         return result, command
@@ -40,7 +48,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(result["mounts"], [])
         self.assertEqual(command.call_count, 1)
-        self.assertEqual(command.call_args.args[0], ["udisksctl", "unmount", "-b", "/dev/mmcblk0p1", "--no-user-interaction"])
+        self.assertEqual(command.call_args.args[0], udisks.action_command(udisks.object_path("mmcblk0p1"), "unmount", self.user, []))
 
     async def test_mount_verifies_identity_mountpoint_permissions_and_readonly(self):
         result, command = await self.perform("mount", [self.unmounted, self.device])
@@ -49,7 +57,7 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["mounts"][0]["target"], "/run/media/deck/card")
         self.assertFalse(result["readOnly"])
         self.assertNotIn("user", command.call_args.kwargs)
-        self.assertEqual(command.call_args.args[0], ["udisksctl", "mount", "-b", "/dev/mmcblk0p1", "--no-user-interaction"])
+        self.assertEqual(command.call_args.args[0], udisks.action_command(udisks.object_path("mmcblk0p1"), "mount", self.user, []))
 
     async def test_exit_zero_without_actual_transition_is_uncertain(self):
         for action, scans in (("unmount", [self.device, self.device]), ("mount", [self.unmounted, self.unmounted])):
@@ -232,6 +240,42 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["returncode"], 1)
         self.assertEqual(command.call_count, 1)
         self.assertNotIn("user", command.call_args.kwargs)
+
+    async def test_no_controlling_terminal_authentication_error_is_not_device_disconnect(self):
+        detail = ("Error creating textual authentication agent: Error opening current controlling terminal "
+                  "for the process ('/dev/tty'): No such device or address\n"
+                  "GDBus.Error:org.freedesktop.UDisks2.Error.NotAuthorizedCanObtain: Not authorized to perform operation")
+        result, command = await self.perform("mount", [self.unmounted], Output(1, "", detail))
+        self.assertEqual(result["status"], "permission_denied")
+        self.assertIn("后台无法进行交互认证", result["message"])
+        self.assertFalse(result["verified"])
+        self.assertEqual(command.call_count, 1)
+
+    async def test_user_change_after_grant_stops_privileged_operation(self):
+        token = self.grant("mount")
+        changed = SimpleNamespace(**{**vars(self.user), "pw_uid": 1001})
+        with patch("storage_guard.remount.current_user", return_value=changed):
+            result, command = await self.perform("mount", [self.unmounted], token=token)
+        self.assertEqual(result["status"], "stale_target")
+        command.assert_not_called()
+
+    async def test_native_returned_path_must_match_real_mount_not_only_command_success(self):
+        output = Output(0, json.dumps({"type": "s", "data": ["/run/media/gamer/different"]}), "")
+        result, _ = await self.perform("mount", [self.unmounted, self.device], output)
+        self.assertEqual(result["status"], "uncertain")
+        self.assertIn("路径不一致", result["message"])
+        self.assertFalse(result["verified"])
+
+    async def test_replacement_during_native_preflight_stops_before_mount(self):
+        token = self.grant("mount")
+        changed = deepcopy(self.unmounted)
+        changed["sysfs"]["diskseq"] = "99"
+        with patch("storage_guard.remount.udisks.prepare", AsyncMock(return_value=udisks.object_path("mmcblk0p1"))), patch(
+                "storage_guard.remount.scan", AsyncMock(side_effect=[inventory(self.unmounted), inventory(changed)])), patch(
+                "storage_guard.remount.live_check"), patch("storage_guard.remount.run", AsyncMock()) as command:
+            result = await self.manager.execute("mount", token)
+        self.assertEqual(result["status"], "stale_target")
+        command.assert_not_called()
 
     async def test_wrong_mount_filesystem_after_command_is_uncertain(self):
         final = deepcopy(self.device)

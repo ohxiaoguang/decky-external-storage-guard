@@ -240,6 +240,11 @@ globalThis.DFL.Navigation.NavigateBack = savedBack;
 logResponse = { status: "permission_denied", message: "无权限", text: "", limited: false };
 button(logTree, "刷新").props.onClick(); button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
 assert.match(text(logTree), /无权限/); assert.ok(text(logTree).includes(originalLog), "failed log read preserves displayed raw text");
+for (const status of ["filtered_empty", "journal_unavailable"]) {
+  logResponse = { status, message: "对照查询异常，不能判定无日志", text: "", limited: false };
+  button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
+  assert.match(text(logTree), /对照查询异常/); assert.ok(text(logTree).includes(originalLog));
+}
 logResponse = { status: "no_logs", message: "本次启动暂无可读取的相关日志", text: "", limited: false };
 button(logTree, "刷新").props.onClick(); await flush(); logTree = renderLog();
 assert.match(text(logTree), /本次启动暂无可读取的相关日志/);

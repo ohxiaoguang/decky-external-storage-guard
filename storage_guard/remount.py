@@ -9,8 +9,9 @@ import re
 import secrets
 import stat
 import time
-from .commands import ReadFailure, current_user, run
+from .commands import ReadFailure, authorization_context, current_user, run
 from .devices import scan, sysfs_facts
+from . import udisks
 
 FILESYSTEMS = {"ext4", "exfat", "ntfs", "ntfs3"}
 DATA_TYPES = {"0fc63daf-8483-4772-8e79-3d69d8477de4",  # Linux filesystem data
@@ -54,6 +55,12 @@ def hosts_plugin(target: str) -> bool:
     protected.extend(os.environ[key] for key in ("DECKY_PLUGIN_DIR", "DECKY_PLUGIN_RUNTIME_DIR", "DECKY_HOME") if os.environ.get(key))
     prefix = target.rstrip("/") + "/"
     return any(str(Path(p).resolve()) == target or str(Path(p).resolve()).startswith(prefix) for p in protected)
+
+
+def safe_mount_target(target):
+    resolved = str(Path(target).resolve())
+    return all(allowed_mount(path) and path != "/run/media/root" and not path.startswith("/run/media/root/")
+               and not hosts_plugin(path) for path in (target, resolved))
 
 
 def eligibility(device: dict, part: dict, mounted: bool = True) -> str:
@@ -146,6 +153,7 @@ class Grant:
     expires: float
     action: str
     options: list[str]
+    actor: tuple
 
 
 def desktop_options(user):
@@ -186,7 +194,8 @@ class PartitionManager:
                     token = None
                     if not reason and len(self.grants) < 256:
                         token = secrets.token_urlsafe(32)
-                        self.grants[token] = Grant(fingerprint, device["id"], part["path"], deepcopy(part["mounts"]), time.monotonic() + TOKEN_TTL, action, options)
+                        self.grants[token] = Grant(fingerprint, device["id"], part["path"], deepcopy(part["mounts"]), time.monotonic() + TOKEN_TTL, action, options,
+                                                   (user.pw_name, user.pw_uid, user.pw_gid, user.pw_dir))
                     elif not reason:
                         reason = "操作分区数量超过上限"
                     part["actions"][action] = {"token": token, "reason": reason}
@@ -217,7 +226,9 @@ class PartitionManager:
         if progress:
             progress(result)
         try:
-            current_user()
+            user = current_user()
+            if grant.actor != (user.pw_name, user.pw_uid, user.pw_gid, user.pw_dir):
+                raise ReadFailure("stale_target", "Decky 用户身份已变化，请刷新后重试")
             _, part = await self.target(grant, action == "unmount", original=True)
             if action == "unmount" and grant.fingerprint not in self.options and len(self.options) >= 256:
                 raise ReadFailure("unavailable", "当前会话可保留的安全挂载选项已达上限，未执行卸载")
@@ -227,9 +238,13 @@ class PartitionManager:
             result["phase"] = action
             if progress:
                 progress(result)
-            argv = ["udisksctl", action, "-b", grant.path, "--no-user-interaction"]
-            if action == "mount" and options:
-                argv.extend(["--options", ",".join(options)])
+            path = await udisks.prepare(part, action, safe_mount_target, readonly="ro" in options)
+            # Recheck after the read-only D-Bus lookups, immediately before the operation.
+            await self.target(grant, action == "unmount", original=True)
+            actor = current_user()
+            if grant.actor != (actor.pw_name, actor.pw_uid, actor.pw_gid, actor.pw_dir):
+                raise ReadFailure("stale_target", "Decky 用户身份已变化，未执行操作")
+            argv = udisks.action_command(path, action, user, options)
             output = await run(argv, timeout=20, limit=65536)
             result.update(returncode=output.code, stdout=output.stdout[:1000], stderr=output.stderr[:1000])
             self.command_result(output, action)
@@ -247,6 +262,10 @@ class PartitionManager:
                 # known wrong root-user automount path as a successful user mount.
                 if any(m["target"] == "/run/media/root" or m["target"].startswith("/run/media/root/") for m in actual["mounts"]):
                     raise ReadFailure("verification_failed", "分区挂载到了 root 用户目录；未确认正确挂载，请核对实际路径")
+                if not safe_mount_target(actual["mounts"][0]["target"]):
+                    raise ReadFailure("verification_failed", "实际挂载路径未通过安全验证，请核对状态")
+                if actual["mounts"][0]["target"] != udisks.mounted_path(output.stdout):
+                    raise ReadFailure("verification_failed", "UDisks 返回路径与实际挂载路径不一致")
                 actual_options = mount_options(actual, result["readOnly"])
                 if not set(options).issubset(actual_options):
                     raise ReadFailure("verification_failed", "未确认挂载权限或只读保护，请核对实际状态")
@@ -259,6 +278,8 @@ class PartitionManager:
             if result["phase"] == "verify" or result["status"] in ("timeout", "output_limit"):
                 result["status"] = "uncertain"
                 result["message"] = "不确定：" + result["message"]
+        if result["status"] == "permission_denied":
+            result["message"] += "；后台无法进行交互认证。" + await authorization_context()
         result["finishedAt"] = datetime.now(timezone.utc).timestamp() * 1000
         return result
 
@@ -269,7 +290,7 @@ class PartitionManager:
         detail = (output.stderr.strip() or output.stdout.strip())[:1000]
         lowered = detail.lower()
         status = action + "_failed"
-        if any(s in lowered for s in ("not authorized", "not authorised", "notauthorized", "authentication", "permission denied", "access denied", "not permitted", "polkit")):
+        if any(s in lowered for s in ("not authorized", "not authorised", "notauthorized", "notauthorizedcanobtain", "authentication", "permission denied", "access denied", "not permitted", "polkit")):
             status, description = "permission_denied", "权限不足"
         elif any(s in lowered for s in ("busy", "in use")):
             status, description = "device_busy", "设备正在使用"
