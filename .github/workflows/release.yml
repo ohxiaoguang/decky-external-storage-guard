@@ -72,7 +72,7 @@ jobs:
             gh release upload "$RELEASE_TAG" External-Storage-Guard.zip External-Storage-Guard.zip.sha256 --clobber
           else
             gh release create "$RELEASE_TAG" External-Storage-Guard.zip External-Storage-Guard.zip.sha256 \
-              --verify-tag --draft --title "External Storage Guard $RELEASE_TAG" --generate-notes
+              --verify-tag --draft --title "External Storage Guard $RELEASE_TAG" --notes-from-tag
           fi
           if [[ "$RELEASE_TAG" == *-* ]]; then
             gh release edit "$RELEASE_TAG" --prerelease=true --draft=false
